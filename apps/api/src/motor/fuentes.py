@@ -1,8 +1,9 @@
 """Origen de los datos crudos del motor.
 
-v1 (actual): lee archivos Excel/CSV desde una carpeta local donde el usuario
-deja las descargas de SharePoint (`apps/api/data/crudos/` por defecto,
-configurable con MOTOR_CRUDOS_DIR).
+v1 (actual): lee archivos Excel/CSV desde una o varias carpetas locales
+(`apps/api/data/crudos/` por defecto, configurable con MOTOR_CRUDOS_DIR, que
+admite varias separadas por `;`): la biblioteca de SharePoint sincronizada y lo
+que se genera en el propio PC.
 
 v2 (Fase 6, al final): misma interfaz `cargar(<fuente>)` pero descargando desde
 SharePoint vía Microsoft Graph API. Nada aguas abajo cambia.
@@ -26,8 +27,16 @@ _API_DIR = pathlib.Path(__file__).resolve().parents[2]
 _REPO_DIR = _API_DIR.parents[1]
 
 
-def _crudos_dir() -> pathlib.Path:
-    """Carpeta de datos crudos: variable de entorno, .env del repo, o el default.
+def _crudos_dirs() -> list[pathlib.Path]:
+    """Carpetas de datos crudos: variable de entorno, .env del repo, o el default.
+
+    Admite VARIAS separadas por `;`, porque los crudos dejaron de estar todos en
+    el mismo lugar: las ventas las mantiene otra persona en la biblioteca de
+    SharePoint "Respaldos BBDD" -donde se actualizan solas, sin que nadie las
+    baje a mano-, mientras los vigentes de FORD los genera el extractor en este
+    PC. Con una sola carpeta configurable habia que elegir cual de las dos se
+    pierde. El separador es `;` y no `:` porque en Windows la ruta ya trae uno
+    en la letra de unidad.
 
     El .env se lee a mano (sin dependencias) porque el motor corre tambien fuera
     de la API, donde no hay pydantic-settings cargando la configuracion.
@@ -42,10 +51,16 @@ def _crudos_dir() -> pathlib.Path:
                     # La ruta puede traer espacios y no estar entrecomillada.
                     valor = linea.split("=", 1)[1].strip().strip('"').strip("'")
                     break
-    return pathlib.Path(valor) if valor else _API_DIR / "data" / "crudos"
+    if not valor:
+        return [_API_DIR / "data" / "crudos"]
+    return [pathlib.Path(p.strip().strip('"').strip("'"))
+            for p in valor.split(";") if p.strip()]
 
 
-CRUDOS_DIR = _crudos_dir()
+CRUDOS_DIRS = _crudos_dirs()
+# La primera es la "principal": la que se nombra en los mensajes de una linea y
+# la que usa el job para barrer los respaldos de venta.
+CRUDOS_DIR = CRUDOS_DIRS[0]
 
 _EXT = (".xlsx", ".xlsm", ".csv")
 
@@ -188,19 +203,34 @@ def es_de_alguna_fuente(nombre: str, excepto: str | None = None) -> bool:
     )
 
 
+def archivos_crudos() -> list[pathlib.Path]:
+    """Todos los Excel/CSV de todas las carpetas configuradas.
+
+    Recursivo: asi cada carpeta puede estar organizada en subcarpetas (Ventas/,
+    stock/, Seguimientos de compras/...) en vez de un monton de archivos sueltos.
+    Una carpeta que no existe se salta sin ruido: la biblioteca de SharePoint
+    puede estar desconectada o todavia sin sincronizar, y eso no tiene por que
+    voltear una corrida que igual puede trabajar con lo que si esta a mano. Lo
+    que quede viejo ya lo denuncia el control de frescura.
+    """
+    salida: list[pathlib.Path] = []
+    for carpeta in CRUDOS_DIRS:
+        if not carpeta.exists():
+            continue
+        salida += [
+            p for p in carpeta.rglob("*")
+            if p.is_file() and p.suffix.lower() in _EXT and not p.name.startswith("~$")
+        ]
+    return salida
+
+
 def _candidatos(fuente: str) -> list[pathlib.Path]:
     if fuente not in FUENTES:
         raise KeyError(f"Fuente desconocida: {fuente!r}. Válidas: {sorted(FUENTES)}")
-    if not CRUDOS_DIR.exists():
-        return []
     spec = FUENTES[fuente]
-    # Recursivo: asi la carpeta puede estar organizada en subcarpetas (Ventas/,
-    # stock/, Seguimientos de compras/...) en vez de un monton de archivos sueltos.
-    archivos = [
-        p for p in CRUDOS_DIR.rglob("*")
-        if p.is_file() and p.suffix.lower() in _EXT and not p.name.startswith("~$")
-    ]
-    matches = [p for p in archivos if _matchea(p.name, spec)]
+    matches = [p for p in archivos_crudos() if _matchea(p.name, spec)]
+    # Entre varias copias manda la FECHA, no en que carpeta esta: durante una
+    # migracion el mismo respaldo vive un tiempo en las dos.
     return sorted(matches, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
@@ -209,8 +239,9 @@ def rutas_de(fuente: str) -> list[pathlib.Path]:
     candidatos = _candidatos(fuente)
     if not candidatos:
         spec = FUENTES[fuente]
+        donde = "\n  ".join(str(c) for c in CRUDOS_DIRS)
         raise FileNotFoundError(
-            f"No se encontró archivo para la fuente '{fuente}' en {CRUDOS_DIR}.\n"
+            f"No se encontró archivo para la fuente '{fuente}'. Se buscó en:\n  {donde}\n"
             f"Patrones: incluye={spec.incluye} excluye={spec.excluye}.\n"
             "Descarga el Excel desde SharePoint y déjalo ahí (ver data/crudos/README.md)."
         )
@@ -253,9 +284,12 @@ def cargar_todos(fuente: str) -> pl.DataFrame:
 def inventariar() -> str:
     """Reporte de qué archivo resolvió cada fuente, con sus columnas. Herramienta
     de la Fase 0 para fijar el mapeo real contra las descargas."""
-    lineas = [f"Carpeta de crudos: {CRUDOS_DIR}", ""]
-    if not CRUDOS_DIR.exists():
-        return "\n".join(lineas + ["(la carpeta no existe todavía)"])
+    lineas = ["Carpetas de crudos:"]
+    for c in CRUDOS_DIRS:
+        lineas.append(f"  {c}" + ("" if c.exists() else "   (no existe todavía)"))
+    lineas.append("")
+    if not any(c.exists() for c in CRUDOS_DIRS):
+        return "\n".join(lineas + ["(ninguna de las carpetas existe todavía)"])
     asignados: set[str] = set()
     for fuente in FUENTES:
         candidatos = _candidatos(fuente)
@@ -273,10 +307,7 @@ def inventariar() -> str:
             lineas.append(f"        (no se pudo leer: {e})")
         if len(candidatos) > 1:
             lineas.append(f"        + {len(candidatos)-1} archivo(s) más se concatenan")
-    presentes = {
-        p.name for p in CRUDOS_DIR.rglob("*")
-        if p.is_file() and p.suffix.lower() in _EXT and not p.name.startswith("~$")
-    }
+    presentes = {p.name for p in archivos_crudos()}
     huerfanos = presentes - asignados
     if huerfanos:
         lineas += ["", f"Sin fuente asignada: {sorted(huerfanos)}"]
