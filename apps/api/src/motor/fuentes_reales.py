@@ -182,6 +182,7 @@ def cargar_fuentes_reales(
     precios_ford_xlsx: str | Path | None = None,
     precios_gildemeister_xlsx: str | Path | None = None,
     vigentes_ford_xlsx: str | Path | None = None,
+    lista_erp_xlsx: str | Path | None = None,
     fin_mes_cerrado: date | None = None,
     sql_conn=None,
 ) -> dict[str, pl.DataFrame]:
@@ -200,6 +201,10 @@ def cargar_fuentes_reales(
     - `vigentes_ford_xlsx`: salida del extractor de WINGS corrido sobre los codigos
       FORD de Curifor (`Vigentes ford*.xlsx`). Mismo formato que la lista de precios;
       se combina con ella en `lectores_excel.combinar_reemplazos_ford`.
+    - `lista_erp_xlsx`: export de la lista del ERP. Solo se usa para el COSTO de
+      los productos que no estan en el Excel de stock, que lista unicamente lo
+      que hoy tiene existencia: sin esto, los agotados -o sea, los que hay que
+      comprar- salian con la columna de costo en blanco.
     - `sql_conn`: conexión a Flexline (`conectores.sql_flexline.conectar()`), como
       alternativa si algun dia se quiere leer en vivo desde la LAN.
 
@@ -236,6 +241,17 @@ def cargar_fuentes_reales(
         # de ninguna fuente, asi que vive en el codigo y no necesita snapshot.
         "dim_sucursal": dim.dim_sucursal(),
     }
+    # Costo de respaldo: el export del ERP conoce el costo de los productos que
+    # no estan en el Excel de stock. Es opcional: sin el, el motor se comporta
+    # como antes.
+    if lista_erp_xlsx:
+        from . import lectores_excel as _lx
+
+        erp = _lx.leer_lista_erp(lista_erp_xlsx)
+        fuentes["costo_erp"] = erp.select(
+            pl.col("producto").alias("Producto"), pl.col("costo").cast(pl.Utf8).alias("Costo")
+        )
+
     for nombre, archivo, kw in (
         ("mapeo", "mapeo_master.csv", {}),
         ("dim_producto", "dim_producto.csv", {"schema_overrides": S}),

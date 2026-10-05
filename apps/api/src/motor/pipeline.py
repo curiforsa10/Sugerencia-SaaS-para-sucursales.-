@@ -114,6 +114,49 @@ def cargar_fuentes(directorio: str | Path) -> dict[str, pl.DataFrame]:
     return fuentes
 
 
+def costos_unitarios(r: pl.DataFrame, fuentes: dict) -> pl.DataFrame:
+    """Agrega `costo_unitario` a `r`, cruzando por `producto_master`.
+
+    Dos fuentes, en orden:
+
+    1. El Excel de Stock por bodegas, MAX(Costo) por producto, como el modelo.
+       Es el que se mueve con cada recepcion, asi que manda cuando existe.
+    2. El export de la lista del ERP, como respaldo.
+
+    El (2) hace falta porque el (1) SOLO lista lo que hoy tiene stock: un
+    producto agotado no aparece ahi y salia sin costo. Y los que hay que comprar
+    son justamente los que no tienen stock. Medido el 05-10-2026: de los 76
+    productos que el sugerido mandaba a comprar sin costo, 69 lo tenian en el
+    export del ERP sin que nadie lo mirara, con valores de hasta $1,19 millones.
+
+    Un costo 0 o negativo del ERP no sirve como respaldo -son los codigos que
+    nunca se compraron-: la celda queda vacia, que dice la verdad, en vez de un
+    cero que parece dato y ensucia el valorizado.
+    """
+    if "costo" in fuentes:
+        costo = (
+            fuentes["costo"].with_columns(_valor("Costo").alias("Costo"))
+            .filter(pl.col("Costo").is_not_null())
+            .group_by("Producto").agg(pl.col("Costo").max().alias("costo_unitario"))
+        )
+        r = r.join(costo, left_on="producto_master", right_on="Producto", how="left")
+    else:
+        r = r.with_columns(pl.lit(None, dtype=pl.Float64).alias("costo_unitario"))
+
+    if "costo_erp" in fuentes:
+        erp = (
+            fuentes["costo_erp"].with_columns(_valor("Costo").alias("costo_erp"))
+            .filter(pl.col("costo_erp") > 0)
+            .group_by("Producto").agg(pl.col("costo_erp").max())
+        )
+        r = (
+            r.join(erp, left_on="producto_master", right_on="Producto", how="left")
+            .with_columns(pl.col("costo_unitario").fill_null(pl.col("costo_erp")))
+            .drop("costo_erp")
+        )
+    return r
+
+
 def _valor(col: str) -> pl.Expr:
     """VALUE() del modelo, con el locale es-CL del origen.
 
@@ -304,16 +347,7 @@ def ejecutar(
             pl.lit(None, dtype=pl.Utf8).alias("unidad_cat"),
         )
 
-    # --- Costo Unitario: MAX(VALUE(Costo)) del grupo en Stock Bodegas (como el modelo) ---
-    if "costo" in fuentes:
-        costo = (
-            fuentes["costo"].with_columns(_valor("Costo").alias("Costo"))
-            .filter(pl.col("Costo").is_not_null())
-            .group_by("Producto").agg(pl.col("Costo").max().alias("costo_unitario"))
-        )
-        r = r.join(costo, left_on="producto_master", right_on="Producto", how="left")
-    else:
-        r = r.with_columns(pl.lit(None, dtype=pl.Float64).alias("costo_unitario"))
+    r = costos_unitarios(r, fuentes)
 
     # --- Listas de precios de proveedor (precio de VENTA, para el margen) ---
     # Se cruzan por `clave_precio`: el codigo de Curifor trae un prefijo numerico

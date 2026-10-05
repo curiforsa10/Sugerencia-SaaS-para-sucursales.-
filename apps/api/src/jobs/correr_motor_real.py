@@ -292,6 +292,8 @@ def construir_csv(hoy: date | None = None) -> Path:
         # Opcional: sin el archivo, los reemplazos salen solo de la lista de precios,
         # que es como funcionaba hasta ago-2026.
         vigentes_ford_xlsx=_buscar("vigentes_ford", obligatorio=False),
+        # Solo para el COSTO de los productos que no estan en el Excel de stock.
+        lista_erp_xlsx=_buscar("lista_erp", obligatorio=False),
         fin_mes_cerrado=_fin_mes_cerrado(hoy),
     )
     avisar_lista_ford_vieja(hoy)
