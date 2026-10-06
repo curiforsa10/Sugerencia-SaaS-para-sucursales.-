@@ -1415,7 +1415,13 @@ def _enviar_una_vez(csv_path: Path, oficial: bool = False) -> dict:
             "en el entorno (nunca en el repo)."
         )
 
-    with httpx.Client(timeout=300) as c:
+    # 900 s y no 300: desde que el sugerido volvio a tener septiembre son 18.254
+    # filas, y a Render en plan gratis cargarlas le toma ~5 minutos. Con 300 s el
+    # cliente se rendia justo antes de la respuesta -el 05 y 06-10-2026 fallaron
+    # los tres intentos con ReadTimeout- y lo peor es que el servidor seguia
+    # cargando igual: cada reintento le apilaba otra carga encima y las volvia a
+    # todas mas lentas.
+    with httpx.Client(timeout=900) as c:
         token = _token(c, base, email, password)
         ruta = "/api/admin/cargar-sugerido" if oficial else "/api/admin/motor/comparar"
         with open(csv_path, "rb") as f:
