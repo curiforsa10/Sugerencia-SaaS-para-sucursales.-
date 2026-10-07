@@ -14,6 +14,7 @@ se corre con `--oficial`, y ahi el mismo CSV entra por el endpoint de carga.
 
 Configuracion (por entorno, nunca en el repo):
     MOTOR_CRUDOS_DIR      carpeta con los Excel (la biblioteca de SharePoint sincronizada)
+    MOTOR_STOCK_DIR       carpeta(s) que se leen SOLO para el stock (Data BI/Datos de SharePoint)
     MOTOR_SNAPSHOT_DIR    CSV congelados de las tablas chicas y estables
     PLATAFORMA_API_URL    URL del backend
     PLATAFORMA_EMAIL      credenciales de un usuario admin de la plataforma

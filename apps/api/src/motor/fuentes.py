@@ -3,7 +3,8 @@
 v1 (actual): lee archivos Excel/CSV desde una o varias carpetas locales
 (`apps/api/data/crudos/` por defecto, configurable con MOTOR_CRUDOS_DIR, que
 admite varias separadas por `;`): la biblioteca de SharePoint sincronizada y lo
-que se genera en el propio PC.
+que se genera en el propio PC. Aparte, MOTOR_STOCK_DIR nombra carpetas que se
+leen SOLO para el stock (ver `archivos_de_stock`).
 
 v2 (Fase 6, al final): misma interfaz `cargar(<fuente>)` pero descargando desde
 SharePoint vía Microsoft Graph API. Nada aguas abajo cambia.
@@ -27,6 +28,29 @@ _API_DIR = pathlib.Path(__file__).resolve().parents[2]
 _REPO_DIR = _API_DIR.parents[1]
 
 
+def _carpetas_de(variable: str) -> list[pathlib.Path]:
+    """Las carpetas de una variable, separadas por `;`: del entorno o del .env del repo.
+
+    Una variable PRESENTE pero vacia cuenta como "ninguna carpeta" y no cae al
+    .env: asi los tests se aislan de la configuracion de este PC.
+
+    El .env se lee a mano (sin dependencias) porque el motor corre tambien fuera
+    de la API, donde no hay pydantic-settings cargando la configuracion.
+    """
+    valor = os.environ.get(variable)
+    if valor is None:
+        env = _REPO_DIR / ".env"
+        if env.exists():
+            for linea in env.read_text(encoding="utf-8").splitlines():
+                linea = linea.strip()
+                if linea.startswith(variable + "="):
+                    # La ruta puede traer espacios y no estar entrecomillada.
+                    valor = linea.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+    return [pathlib.Path(p.strip().strip('"').strip("'"))
+            for p in (valor or "").split(";") if p.strip()]
+
+
 def _crudos_dirs() -> list[pathlib.Path]:
     """Carpetas de datos crudos: variable de entorno, .env del repo, o el default.
 
@@ -37,30 +61,18 @@ def _crudos_dirs() -> list[pathlib.Path]:
     PC. Con una sola carpeta configurable habia que elegir cual de las dos se
     pierde. El separador es `;` y no `:` porque en Windows la ruta ya trae uno
     en la letra de unidad.
-
-    El .env se lee a mano (sin dependencias) porque el motor corre tambien fuera
-    de la API, donde no hay pydantic-settings cargando la configuracion.
     """
-    valor = os.environ.get("MOTOR_CRUDOS_DIR")
-    if not valor:
-        env = _REPO_DIR / ".env"
-        if env.exists():
-            for linea in env.read_text(encoding="utf-8").splitlines():
-                linea = linea.strip()
-                if linea.startswith("MOTOR_CRUDOS_DIR="):
-                    # La ruta puede traer espacios y no estar entrecomillada.
-                    valor = linea.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
-    if not valor:
-        return [_API_DIR / "data" / "crudos"]
-    return [pathlib.Path(p.strip().strip('"').strip("'"))
-            for p in valor.split(";") if p.strip()]
+    return _carpetas_de("MOTOR_CRUDOS_DIR") or [_API_DIR / "data" / "crudos"]
 
 
 CRUDOS_DIRS = _crudos_dirs()
 # La primera es la "principal": la que se nombra en los mensajes de una linea y
 # la que usa el job para barrer los respaldos de venta.
 CRUDOS_DIR = CRUDOS_DIRS[0]
+
+# Carpetas que se leen SOLO para estas dos fuentes. Ver `archivos_de_stock`.
+STOCK_DIRS = _carpetas_de("MOTOR_STOCK_DIR")
+FUENTES_DE_STOCK = ("stock_bodegas", "stock_bodegas_frontera")
 
 _EXT = (".xlsx", ".xlsm", ".csv")
 
@@ -224,11 +236,44 @@ def archivos_crudos() -> list[pathlib.Path]:
     return salida
 
 
+def archivos_de_stock() -> list[pathlib.Path]:
+    """Los Excel/CSV de las carpetas de MOTOR_STOCK_DIR, solo del primer nivel.
+
+    Esas carpetas se leen SOLO para el stock porque no son del motor: la de
+    SharePoint donde el equipo sube "Stock bodegas.xlsx" cada dia (Data BI/Datos)
+    trae tambien los seguimientos de compras y la produccion post-venta de las
+    dos empresas. Sumarla a MOTOR_CRUDOS_DIR haria que esos archivos compitan por
+    fecha con los nuestros: "Frontera - Produccion Mensual Post-Venta.xlsx" calza
+    con el patron de las ventas de Frontera y "Curifor - Seguimiento Compras.xlsx"
+    con el del seguimiento nacional.
+
+    Sin recursion por lo mismo: la subcarpeta "Anteriores" guarda versiones viejas.
+    Una carpeta que no existe se salta, igual que en `archivos_crudos`.
+    """
+    salida: list[pathlib.Path] = []
+    for carpeta in STOCK_DIRS:
+        if not carpeta.is_dir():
+            continue
+        salida += [
+            p for p in carpeta.iterdir()
+            if p.is_file() and p.suffix.lower() in _EXT and not p.name.startswith("~$")
+        ]
+    return salida
+
+
+def _carpetas_de_la_fuente(fuente: str) -> list[pathlib.Path]:
+    """Donde se busca una fuente: las de crudos, y para el stock tambien las suyas."""
+    return CRUDOS_DIRS + (STOCK_DIRS if fuente in FUENTES_DE_STOCK else [])
+
+
 def _candidatos(fuente: str) -> list[pathlib.Path]:
     if fuente not in FUENTES:
         raise KeyError(f"Fuente desconocida: {fuente!r}. Válidas: {sorted(FUENTES)}")
     spec = FUENTES[fuente]
-    matches = [p for p in archivos_crudos() if _matchea(p.name, spec)]
+    archivos = archivos_crudos()
+    if fuente in FUENTES_DE_STOCK:
+        archivos += archivos_de_stock()
+    matches = [p for p in archivos if _matchea(p.name, spec)]
     # Entre varias copias manda la FECHA, no en que carpeta esta: durante una
     # migracion el mismo respaldo vive un tiempo en las dos.
     return sorted(matches, key=lambda p: p.stat().st_mtime, reverse=True)
@@ -239,7 +284,7 @@ def rutas_de(fuente: str) -> list[pathlib.Path]:
     candidatos = _candidatos(fuente)
     if not candidatos:
         spec = FUENTES[fuente]
-        donde = "\n  ".join(str(c) for c in CRUDOS_DIRS)
+        donde = "\n  ".join(str(c) for c in _carpetas_de_la_fuente(fuente))
         raise FileNotFoundError(
             f"No se encontró archivo para la fuente '{fuente}'. Se buscó en:\n  {donde}\n"
             f"Patrones: incluye={spec.incluye} excluye={spec.excluye}.\n"
@@ -287,6 +332,10 @@ def inventariar() -> str:
     lineas = ["Carpetas de crudos:"]
     for c in CRUDOS_DIRS:
         lineas.append(f"  {c}" + ("" if c.exists() else "   (no existe todavía)"))
+    if STOCK_DIRS:
+        lineas.append("Carpetas solo para el stock:")
+        for c in STOCK_DIRS:
+            lineas.append(f"  {c}" + ("" if c.exists() else "   (no existe todavía)"))
     lineas.append("")
     if not any(c.exists() for c in CRUDOS_DIRS):
         return "\n".join(lineas + ["(ninguna de las carpetas existe todavía)"])
