@@ -926,32 +926,37 @@ def _guardar_lead_time(fuentes: dict) -> Path | None:
 # Importado o Nacional. Las dos salen de archivos que el motor ya lee.
 
 def _guardar_costos_precios(fuentes: dict) -> Path | None:
-    """Costo por producto desde el Excel de stock (columna Costo), las dos empresas.
+    """Costo por producto desde el Excel de stock de Curifor (columna Costo).
 
-    El stock unificado tira esta columna porque el catalogo no la usa. Aca se
-    guarda aparte: es la unica fuente de costo para los ~60k productos de la
-    lista de precios que el sugerido no evalua."""
+    Es la unica fuente de costo para los productos de la lista de precios que el
+    sugerido no evalua: a esos `dim_producto` no los cubre.
+
+    Estuvo muerta desde que se escribio hasta el 07-10-2026, por dos razones:
+    buscaba la columna en `stock_bodegas`, que no la trae, y aunque la hubiera
+    encontrado el costo viene como texto con coma decimal ("95233,75000000") y un
+    cast a secas lo dejaba vacio. 305 productos quedaron con el costo de la carga
+    del 04-09-2026 y 13 tenian el precio corrido mas de un 50%.
+
+    Solo Curifor: la lista de precios es de Curifor y el costo de Frontera es el
+    de otra empresa. Si un producto tiene varios costos (lotes) se toma el mayor,
+    como el modelo.
+    """
     import polars as pl
 
-    partes = []
-    for clave in ("stock_bodegas", "stock_bodegas_frontera"):
-        df = fuentes.get(clave)
-        if df is None or df.is_empty() or "Costo" not in df.columns:
-            continue
-        partes.append(
-            df.select(
-                pl.col("Producto").cast(pl.Utf8).alias("producto"),
-                pl.col("Costo").cast(pl.Float64, strict=False).alias("costo"),
-            )
-        )
-    if not partes:
+    from ..motor.pipeline import _valor
+
+    df = fuentes.get("costo")
+    if df is None or df.is_empty():
         return None
     (
-        pl.concat(partes)
-        .filter(pl.col("producto").is_not_null() & (pl.col("costo") > 0))
-        # Un producto esta en varias bodegas con el mismo costo; si difiere, se
-        # toma el mayor (la ultima compra empuja el promedio hacia arriba).
+        df.select(
+            pl.col("Producto").cast(pl.Utf8).str.strip_chars().alias("producto"),
+            _valor("Costo").alias("costo"),
+        )
+        .filter(pl.col("producto").is_not_null() & (pl.col("producto") != "")
+                & (pl.col("costo") > 0))
         .group_by("producto").agg(pl.col("costo").max())
+        .sort("producto")
         .write_csv(SALIDA_COSTOS)
     )
     return SALIDA_COSTOS
@@ -1043,7 +1048,18 @@ def publicar_costos_precios() -> dict | None:
     with open(SALIDA_COSTOS, encoding="utf-8", newline="") as f:
         filas = [{"producto": r["producto"], "costo": float(r["costo"])}
                  for r in csv.DictReader(f) if r.get("producto")]
-    return _publicar_json("los costos de precios", "/api/admin/precios/costos", filas)
+    # Por lotes: la plataforma actualiza fila a fila y ~20 mil en una sola request
+    # rozan el corte de Render. Aplicar la mitad no hace dano: cada costo es
+    # independiente y manana se vuelven a mandar todos.
+    total = {"actualizados": 0, "ignorados": 0}
+    for i in range(0, len(filas), 5000):
+        r = _publicar_json("los costos de precios", "/api/admin/precios/costos",
+                           filas[i:i + 5000])
+        if r is None:
+            return None
+        for k in total:
+            total[k] += int(r.get(k) or 0)
+    return total
 
 
 def publicar_compras_precios() -> dict | None:

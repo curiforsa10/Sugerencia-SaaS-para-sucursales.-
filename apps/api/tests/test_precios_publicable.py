@@ -26,21 +26,41 @@ def _stock(filas):
     )
 
 
-def test_el_costo_sale_del_excel_de_stock_de_las_dos_empresas(salidas):
+def _fuentes_como_en_produccion(costo_curifor, stock_frontera=None):
+    """Las fuentes con la forma que les da `fuentes_reales`.
+
+    Los tests anteriores le pasaban a `_guardar_costos_precios` un
+    `stock_bodegas` con columna Costo numerica, que la corrida real nunca le
+    entrega: `stock_bodegas` va sin Costo y el costo viaja aparte, en `costo`,
+    como texto con coma decimal. Por eso los tests pasaban y el paso estuvo
+    muerto hasta el 07-10-2026.
+    """
     fuentes = {
-        "stock_bodegas": _stock([("71 AAA1", "B1", 5, "10000"), ("13 BBB2", "B1", 2, "5000")]),
-        "stock_bodegas_frontera": _stock([("70 CCC3", "F1", 1, "7000")]),
+        "stock_bodegas": pl.DataFrame(
+            {"Producto": [p for p, _ in costo_curifor], "Bodega": ["B1"] * len(costo_curifor),
+             "SucursalID": ["S1"] * len(costo_curifor), "Stock": [1.0] * len(costo_curifor)}),
+        "costo": pl.DataFrame(costo_curifor, schema=["Producto", "Costo"], orient="row"),
     }
+    if stock_frontera is not None:
+        fuentes["stock_bodegas_frontera"] = _stock(stock_frontera)
+    return fuentes
+
+
+def test_el_costo_sale_del_excel_de_stock_de_curifor(salidas):
+    """Solo Curifor: la lista de precios es de Curifor (decision del 07-10-2026)."""
+    fuentes = _fuentes_como_en_produccion(
+        [("71 AAA1", "10000,5"), ("13 BBB2", "5000")],
+        stock_frontera=[("70 CCC3", "F1", 1, "7000")],
+    )
     assert job._guardar_costos_precios(fuentes) == job.SALIDA_COSTOS
     d = {r["producto"]: r["costo"] for r in pl.read_csv(job.SALIDA_COSTOS).to_dicts()}
-    assert d == {"71 AAA1": 10000.0, "13 BBB2": 5000.0, "70 CCC3": 7000.0}
+    assert d == {"71 AAA1": 10000.5, "13 BBB2": 5000.0}
 
 
 def test_un_producto_en_varias_bodegas_queda_con_un_solo_costo(salidas):
-    fuentes = {"stock_bodegas": _stock([
-        ("71 AAA1", "B1", 5, "10000"), ("71 AAA1", "B2", 3, "11000"),
-        ("13 SINCOSTO", "B1", 1, "0"), ("14 VACIO", "B1", 1, None),
-    ])}
+    fuentes = _fuentes_como_en_produccion([
+        ("71 AAA1", "10000"), ("71 AAA1", "11000"), ("13 SINCOSTO", "0"), ("14 VACIO", None),
+    ])
     job._guardar_costos_precios(fuentes)
     d = {r["producto"]: r["costo"] for r in pl.read_csv(job.SALIDA_COSTOS).to_dicts()}
     # Un costo por producto, y el que no tiene costo no se manda: un cero pisaria
@@ -48,7 +68,7 @@ def test_un_producto_en_varias_bodegas_queda_con_un_solo_costo(salidas):
     assert d == {"71 AAA1": 11000.0}
 
 
-def test_sin_columna_costo_no_escribe_nada(salidas):
+def test_sin_la_fuente_de_costo_no_escribe_nada(salidas):
     df = pl.DataFrame({"Producto": ["71 AAA1"], "Bodega": ["B1"], "Stock": [5]})
     assert job._guardar_costos_precios({"stock_bodegas": df}) is None
     assert job._guardar_costos_precios({}) is None
