@@ -74,3 +74,90 @@ def test_una_oc_de_frontera_usa_la_fecha_del_documento():
 
     con = _stock_transito(seg, HOY, con_fecha=True)
     assert con.rows() == [("F", "LINDEROS", 5.0, date(2026, 7, 25))]
+
+
+# --- La empresa de cada OC (07-10-2026) -------------------------------------------
+
+
+def _dos_empresas() -> pl.DataFrame:
+    """Una OC vigente de Curifor y una de Frontera del mismo producto."""
+    return pl.DataFrame({
+        "Producto": ["A", "A"],
+        "SucursalID": ["LINDEROS", "LINDEROS"],
+        "Cantidad": [2.0, 5.0],
+        "EstadoOC": ["Pendiente", ""],
+        "EstadoDoc": ["", "Pendiente"],
+        "Origen": ["Curifor Nacional", "Frontera Nacional"],
+        "Motivo": ["reposicion", "reposicion"],
+        "FechaOC": [date.today(), None],
+        "FechaDoc": [None, date.today()],
+    }, schema_overrides={"FechaOC": pl.Date, "FechaDoc": pl.Date})
+
+
+def test_el_transito_publicado_dice_de_que_empresa_es(tmp_path, monkeypatch):
+    """La lista de precios cuenta solo el de Curifor; el sugerido, los dos."""
+    from src.jobs import correr_motor_real as job
+
+    monkeypatch.setattr(job, "SALIDA_TRANSITO", tmp_path / "transito.csv")
+    job._guardar_transito({"seguimiento_transito": _dos_empresas()})
+
+    filas = pl.read_csv(job.SALIDA_TRANSITO).select(["producto", "cantidad", "origen"]).rows()
+    assert sorted(filas) == [("A", 2.0, "CURIFOR"), ("A", 5.0, "FRONTERA")]
+
+
+def test_separar_por_empresa_no_cambia_el_total(tmp_path, monkeypatch):
+    """Se calcula por separado con la misma funcion: la suma tiene que ser la de
+    siempre, o el sugerido y la plataforma dejarian de coincidir."""
+    from src.jobs import correr_motor_real as job
+
+    monkeypatch.setattr(job, "SALIDA_TRANSITO", tmp_path / "transito.csv")
+    seg = pl.concat([_seguimiento(), _dos_empresas()], how="diagonal_relaxed")
+    job._guardar_transito({"seguimiento_transito": seg})
+
+    junto = _stock_transito(seg, date.today())
+    separado = pl.read_csv(job.SALIDA_TRANSITO)
+    assert separado["cantidad"].sum() == junto["stock_transito"].sum()
+
+
+def test_el_origen_viaja_a_la_plataforma(tmp_path, monkeypatch):
+    import httpx
+
+    from src.jobs import correr_motor_real as job
+
+    monkeypatch.setattr(job, "SALIDA_TRANSITO", tmp_path / "transito.csv")
+    job._guardar_transito({"seguimiento_transito": _dos_empresas()})
+    enviado = []
+
+    class _Resp:
+        def __init__(self, d):
+            self._d = d
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._d
+
+    class _Cliente:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, json=None, headers=None):
+            if url.endswith("/api/auth/login"):
+                return _Resp({"token": "t"})
+            enviado.extend(json["filas"])
+            return _Resp({"filas_cargadas": len(json["filas"])})
+
+    job.olvidar_token()
+    monkeypatch.setattr(job, "_credenciales", lambda: ("http://api", "a@b.cl", "x"))
+    monkeypatch.setattr(httpx, "Client", _Cliente)
+    job.publicar_transito()
+    job.olvidar_token()
+
+    assert sorted(f["origen"] for f in enviado) == ["CURIFOR", "FRONTERA"]

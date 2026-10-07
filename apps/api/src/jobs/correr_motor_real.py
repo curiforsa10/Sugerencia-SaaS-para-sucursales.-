@@ -382,15 +382,30 @@ def _guardar_transito(fuentes: dict) -> Path | None:
     """
     from datetime import date as _date
 
+    import polars as pl
+
+    from ..motor.conectores.sql_flexline import ORIGEN_FRONTERA
     from ..motor.sugerido import _stock_transito
 
     seg = fuentes.get("seguimiento_transito")
     if seg is None or seg.is_empty():
         return None
-    df = _stock_transito(seg, _date.today(), con_fecha=True)
-    if df.is_empty():
+    # Cada fila sale con su empresa: la lista de precios es de Curifor y solo
+    # cuenta su transito (07-10-2026); el sugerido sigue usando los dos. Se
+    # calcula por separado con la misma funcion, asi que la suma por producto es
+    # la misma de antes.
+    es_frontera = pl.col("Origen").fill_null("").eq(ORIGEN_FRONTERA)
+    partes = []
+    for origen, filtro in (("CURIFOR", ~es_frontera), ("FRONTERA", es_frontera)):
+        sub = seg.filter(filtro)
+        if sub.is_empty():
+            continue
+        df = _stock_transito(sub, _date.today(), con_fecha=True)
+        if not df.is_empty():
+            partes.append(df.with_columns(pl.lit(origen).alias("origen")))
+    if not partes:
         return None
-    df.rename(
+    pl.concat(partes, how="vertical_relaxed").rename(
         {"producto_master": "producto", "sucursal_final": "sucursal_id",
          "stock_transito": "cantidad"}
     ).write_csv(SALIDA_TRANSITO)
@@ -415,6 +430,7 @@ def publicar_transito() -> dict | None:
                 "sucursal_id": r["sucursal_id"] or None,
                 "cantidad": float(r["cantidad"]),
                 "pedido_desde": (r.get("pedido_desde") or "")[:10] or None,
+                "origen": r.get("origen") or None,
             }
             for r in csv.DictReader(f)
             if r.get("producto") and r.get("cantidad")
