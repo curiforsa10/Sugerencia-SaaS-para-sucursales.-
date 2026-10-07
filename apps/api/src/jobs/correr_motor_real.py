@@ -103,7 +103,30 @@ def _credenciales() -> tuple[str, str | None, str | None]:
 _TOKEN: dict[str, str | None] = {"valor": None}
 
 
+class LlamadaRealDesdeUnTest(BaseException):
+    """Un test intento entrar a la plataforma de verdad.
+
+    Paso el 07-10-2026: un test corria la secuencia completa con los pasos de
+    publicacion apagados uno por uno, y el paso nuevo de altas desde el stock no
+    estaba en la lista. Publico 316 productos en produccion y el test paso en
+    verde. Es BaseException a proposito: los pasos atrapan Exception para anotar
+    el fallo y seguir, y con eso el test no se habria caido nunca.
+    """
+
+
+def _es_cliente_de_verdad(c) -> bool:
+    # Por el modulo de la clase y no con isinstance: hay tests que reemplazan
+    # `httpx.Client` por una funcion, y ahi isinstance revienta.
+    return type(c).__module__.split(".")[0] == "httpx"
+
+
 def _token(c, base: str, email: str, password: str, *, renovar: bool = False) -> str:
+    # Toda llamada autenticada pasa por aca: es el unico lugar donde hace falta
+    # cerrar la puerta. Los tests usan clientes falsos y por eso no les afecta.
+    if os.environ.get("PYTEST_CURRENT_TEST") and _es_cliente_de_verdad(c):
+        raise LlamadaRealDesdeUnTest(
+            f"Un test intento entrar a {base}. Apaga ese paso en el test: la "
+            "plataforma de verdad no se toca desde la suite.")
     if renovar or not _TOKEN["valor"]:
         r = c.post(f"{base}/api/auth/login", json={"email": email, "password": password})
         r.raise_for_status()

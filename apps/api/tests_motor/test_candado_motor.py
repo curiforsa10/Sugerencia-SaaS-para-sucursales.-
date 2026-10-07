@@ -150,3 +150,20 @@ def test_429_y_401_se_reintentan():
     assert job._es_transitorio(RuntimeError("Client error '429 Too Many Requests'"))
     assert job._es_transitorio(RuntimeError("Client error '401 Unauthorized'"))
     assert not job._es_transitorio(RuntimeError("Client error '403 Forbidden'"))
+
+
+def test_un_test_no_puede_entrar_a_la_plataforma_de_verdad():
+    """Con un cliente HTTP de verdad, el login se corta antes de salir a la red."""
+    import httpx
+
+    job.olvidar_token()
+    with httpx.Client() as c:
+        with pytest.raises(job.LlamadaRealDesdeUnTest):
+            job._token(c, "https://sugerido-api.onrender.com", "a@b", "p")
+    job.olvidar_token()
+
+
+def test_la_guarda_no_la_atrapa_un_except_exception():
+    """Los pasos de publicacion atrapan Exception para anotar el fallo y seguir.
+    Si la guarda fuera una Exception, el test que se cuela pasaria en verde."""
+    assert not issubclass(job.LlamadaRealDesdeUnTest, Exception)
