@@ -201,3 +201,99 @@ def test_sin_archivo_no_es_un_fallo(tmp_path, monkeypatch):
 def test_la_frescura_avisa_pero_no_frena():
     assert job.FRESCURA_DIAS["lista_erp"] == 10
     assert "lista_erp" in job.FRESCURA_SOLO_AVISA
+
+
+# --- El costo con coma decimal ----------------------------------------------------
+
+
+def test_el_costo_con_coma_decimal_se_lee(tmp_path):
+    """El Excel de stock trae el costo como texto con coma: "95233,75000000".
+    Con un cast a secas salia vacio en todas las filas y los productos nuevos
+    nacian sin costo, o sea sin precio."""
+    ruta = _erp_xlsx(tmp_path, [
+        _fila("17 A", "AMORTIGUADOR", 3, "95233,75000000", 1780),
+        _fila("17 B", "BUJIA", 1, "1.234,5", 900),
+        _fila("17 C", "CORREA", 1, 500, 900),
+    ])
+
+    por = {r["producto"]: r for r in lx.leer_lista_erp(ruta).to_dicts()}
+
+    assert por["17 A"]["costo"] == 95233.75
+    assert por["17 B"]["costo"] == 1234.5
+    assert por["17 C"]["costo"] == 500
+
+
+# --- Las altas desde el stock del dia ----------------------------------------------
+
+
+@pytest.fixture
+def stock_del_dia(tmp_path, monkeypatch):
+    """Un Excel de stock con formato del ERP y el feed falseado."""
+    from src.motor import fuentes
+
+    ruta = _erp_xlsx(tmp_path, [
+        _fila("17 NUEVO", "AMORTIGUADOR", 2, "1000,5", 1780),
+        _fila("17 YA", "BUJIA", 1, "500", 900),
+    ], nombre="STOCK_BODEGAS_CURIFOR.xlsx")
+    monkeypatch.setattr(fuentes, "CRUDOS_DIRS", [tmp_path])
+    monkeypatch.setattr(fuentes, "CRUDOS_DIR", tmp_path)
+    # Sin esto entraria la carpeta de SharePoint del .env de este PC.
+    monkeypatch.setattr(fuentes, "STOCK_DIRS", [])
+    monkeypatch.setattr(job, "MARCA_STOCK_PRECIOS", tmp_path / "marca_stock.txt")
+    monkeypatch.setattr(job, "MARCA_LISTA_ERP", tmp_path / "marca_erp.txt")
+    enviados: list[tuple[str, list[dict]]] = []
+
+    def falso_publicar(paso, endpoint, filas):
+        enviados.append((endpoint, filas))
+        return {"recibidos": len(filas), "actualizados": 1, "creados": 1, "no_entran": {}}
+
+    monkeypatch.setattr(job, "_publicar_json", falso_publicar)
+    return ruta, enviados
+
+
+def test_el_stock_del_dia_va_por_el_mismo_feed_que_el_erp(stock_del_dia):
+    """Mismo endpoint y mismas columnas: las reglas de entrada siguen en un solo
+    lugar, la plataforma."""
+    _, enviados = stock_del_dia
+
+    r = job.publicar_altas_desde_stock()
+
+    assert r["creados"] == 1 and r["archivo"] == "STOCK_BODEGAS_CURIFOR.xlsx"
+    assert [e for e, _ in enviados] == ["/api/admin/precios/erp"]
+    filas = {f["producto"]: f for f in enviados[0][1]}
+    assert set(filas) == {"17 NUEVO", "17 YA"}
+    assert filas["17 NUEVO"]["costo"] == 1000.5, "nace con costo, o sea con precio"
+    assert set(filas["17 NUEVO"]) == {
+        "producto", "glosa", "stock", "costo", "precio_erp", "tipo_erp", "procedencia"}
+
+
+def test_el_mismo_stock_no_se_manda_dos_veces(stock_del_dia):
+    _, enviados = stock_del_dia
+
+    job.publicar_altas_desde_stock()
+    assert job.publicar_altas_desde_stock() is None
+    assert len(enviados) == 1
+
+
+def test_la_marca_del_stock_no_toca_la_del_export_del_erp(stock_del_dia):
+    """Son dos archivos distintos: publicar uno no puede hacer creer al motor que
+    el otro ya se publico."""
+    job.publicar_altas_desde_stock()
+
+    assert job.MARCA_STOCK_PRECIOS.exists()
+    assert not job.MARCA_LISTA_ERP.exists()
+
+
+def test_un_lote_caido_del_stock_no_deja_la_marca(stock_del_dia, monkeypatch):
+    monkeypatch.setattr(job, "_publicar_json", lambda *a: None)
+
+    assert job.publicar_altas_desde_stock() is None
+    assert not job.MARCA_STOCK_PRECIOS.exists(), "manana tiene que reintentar entero"
+
+
+def test_las_altas_van_antes_del_recalculo():
+    """Si fueran despues, lo nuevo pasaria un dia entero sin precio."""
+    import inspect
+
+    fuente = inspect.getsource(job._run)
+    assert fuente.index("publicar_altas_desde_stock") < fuente.index("recalcular_precios)")

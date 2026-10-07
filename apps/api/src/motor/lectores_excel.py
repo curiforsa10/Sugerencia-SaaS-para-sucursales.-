@@ -763,8 +763,29 @@ COLUMNAS_LISTA_ERP = {
 }
 
 
+def _numero_cl(col: str) -> pl.Expr:
+    """Un numero que puede venir como numero o como texto con coma decimal.
+
+    Misma regla que `pipeline._valor`: si hay coma, el punto es separador de
+    miles. El export del ERP trae el costo como numero, pero el Excel de stock
+    lo trae como texto ("95233,75000000") y un `cast(Float64)` a secas lo dejaba
+    vacio en el 100% de las filas.
+    """
+    txt = pl.col(col).cast(pl.Utf8, strict=False).str.strip_chars()
+    return (
+        pl.when(txt.str.contains(","))
+        .then(txt.str.replace_all(r"\.", "").str.replace(",", "."))
+        .otherwise(txt)
+        .cast(pl.Float64, strict=False)
+        .alias(col)
+    )
+
+
 def leer_lista_erp(ruta) -> pl.DataFrame:
     """El export del ERP (`lista_erp.xlsx`), una fila por producto.
+
+    Lee tambien el Excel de stock de cada dia, que es el mismo reporte del ERP
+    filtrado a lo que tiene existencia (ver `publicar_altas_desde_stock`).
 
     El archivo trae 410 mil filas y repite el producto por lote/serie, asi que se
     agrupa: stock sumado, costo y precio el mayor, el resto la primera fila. Se
@@ -785,11 +806,7 @@ def leer_lista_erp(ruta) -> pl.DataFrame:
     return (
         df.with_columns(pl.col("producto").cast(pl.Utf8).str.strip_chars())
         .filter(pl.col("producto").is_not_null() & (pl.col("producto") != ""))
-        .with_columns(
-            pl.col("stock").cast(pl.Float64, strict=False),
-            pl.col("costo").cast(pl.Float64, strict=False),
-            pl.col("precio_erp").cast(pl.Float64, strict=False),
-        )
+        .with_columns(_numero_cl("stock"), _numero_cl("costo"), _numero_cl("precio_erp"))
         .group_by("producto", maintain_order=True)
         .agg(
             pl.col("glosa").cast(pl.Utf8).first(),

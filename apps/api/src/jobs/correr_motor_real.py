@@ -58,6 +58,7 @@ SALIDA_COMPRAS = _API_DIR / "data" / "compras_precios_motor.csv"
 # Cuando se publico por ultima vez el export del ERP (mtime del archivo). Son
 # 410 mil filas en 80 lotes: se manda solo cuando el archivo cambio.
 MARCA_LISTA_ERP = _API_DIR / "data" / "lista_erp_publicada.txt"
+MARCA_STOCK_PRECIOS = _API_DIR / "data" / "stock_precios_publicado.txt"
 # Candado: una sola corrida a la vez en este PC.
 #
 # El lunes 14-09-2026 corrieron tres motores en media hora: el que lanza la
@@ -1042,6 +1043,40 @@ def publicar_compras_precios() -> dict | None:
     return _publicar_json("las compras de precios", "/api/admin/precios/compras", filas)
 
 
+def _publicar_al_feed_erp(paso: str, ruta, marca) -> dict | None:
+    """Manda un archivo con formato del ERP a la lista de precios, por lotes, SOLO
+    si cambio desde la ultima vez (la marca guarda nombre, fecha y tamano).
+
+    Devuelve None si ya se publico este mismo o si un lote fallo -sin escribir la
+    marca, para que manana se reintente entero-; un dict con los totales si se
+    publico.
+    """
+    from ..motor import lectores_excel as _lx
+
+    huella = f"{ruta.name}|{int(ruta.stat().st_mtime)}|{ruta.stat().st_size}"
+    if marca.exists() and marca.read_text(encoding="utf-8").strip() == huella:
+        return None
+
+    df = _lx.leer_lista_erp(ruta)
+    filas = df.to_dicts()
+    total = {"recibidos": 0, "actualizados": 0, "creados": 0, "no_entran": {}, "lotes": 0}
+    LOTE = 5000
+    for i in range(0, len(filas), LOTE):
+        r = _publicar_json(paso, "/api/admin/precios/erp", filas[i:i + LOTE])
+        if r is None:
+            # Un lote caido deja la marca sin escribir: manana se reintenta entero.
+            return None
+        total["lotes"] += 1
+        for k in ("recibidos", "actualizados", "creados"):
+            total[k] += int(r.get(k) or 0)
+        for k, v in (r.get("no_entran") or {}).items():
+            total["no_entran"][k] = total["no_entran"].get(k, 0) + int(v)
+    marca.parent.mkdir(parents=True, exist_ok=True)
+    marca.write_text(huella, encoding="utf-8")
+    total["archivo"] = ruta.name
+    return total
+
+
 def publicar_lista_erp() -> dict | None:
     """Sube el export del ERP a la lista de precios, SOLO si el archivo cambio.
 
@@ -1054,34 +1089,37 @@ def publicar_lista_erp() -> dict | None:
     precio en la misma corrida.
     """
     from ..motor import fuentes as _fuentes
-    from ..motor import lectores_excel as _lx
 
     try:
         ruta = _fuentes.ruta_de("lista_erp")
     except Exception:  # noqa: BLE001 - sin archivo no hay feed, y no es un fallo
         return None
-    huella = f"{ruta.name}|{int(ruta.stat().st_mtime)}|{ruta.stat().st_size}"
-    if MARCA_LISTA_ERP.exists() and MARCA_LISTA_ERP.read_text(encoding="utf-8").strip() == huella:
-        return None
+    return _publicar_al_feed_erp("la lista del ERP", ruta, MARCA_LISTA_ERP)
 
-    df = _lx.leer_lista_erp(ruta)
-    filas = df.to_dicts()
-    total = {"recibidos": 0, "actualizados": 0, "creados": 0, "no_entran": {}, "lotes": 0}
-    LOTE = 5000
-    for i in range(0, len(filas), LOTE):
-        r = _publicar_json("la lista del ERP", "/api/admin/precios/erp", filas[i:i + LOTE])
-        if r is None:
-            # Un lote caido deja la marca sin escribir: manana se reintenta entero.
-            return None
-        total["lotes"] += 1
-        for k in ("recibidos", "actualizados", "creados"):
-            total[k] += int(r.get(k) or 0)
-        for k, v in (r.get("no_entran") or {}).items():
-            total["no_entran"][k] = total["no_entran"].get(k, 0) + int(v)
-    MARCA_LISTA_ERP.parent.mkdir(parents=True, exist_ok=True)
-    MARCA_LISTA_ERP.write_text(huella, encoding="utf-8")
-    total["archivo"] = ruta.name
-    return total
+
+def publicar_altas_desde_stock() -> dict | None:
+    """Pasa el Excel de stock del dia por el mismo feed que el export del ERP.
+
+    La lista de precios solo sumaba productos nuevos con el export del ERP, que
+    alguien baja a mano: el ultimo era del 21-08-2026. Un repuesto que llego
+    despues, o que ese dia no tenia stock, no existia para la lista aunque
+    estuviera en bodega. El 06-10-2026 Hugo encontro 357 asi.
+
+    El Excel de stock es el mismo reporte del ERP filtrado a lo que tiene
+    existencia: trae descripcion, procedencia, precio de venta y costo, y llega
+    todos los dias. Las reglas de entrada no cambian, las aplica la plataforma:
+    repuesto, con stock, con rubro en la politica y no sacado a mano. A los que
+    ya estan les deja el precio ERP al dia.
+
+    Solo el stock de Curifor: la lista de precios es de Curifor.
+    """
+    from ..motor import fuentes as _fuentes
+
+    try:
+        ruta = _fuentes.ruta_de("stock_bodegas")
+    except Exception:  # noqa: BLE001 - sin stock el motor ya fallo antes; aca no se repite
+        return None
+    return _publicar_al_feed_erp("las altas desde el stock", ruta, MARCA_STOCK_PRECIOS)
 
 
 def recalcular_precios() -> dict | None:
@@ -1736,6 +1774,14 @@ def _run(oficial: bool = False, ignorar_frescura: bool = False) -> int:
             fuera = ", ".join(f"{k} {v:,}" for k, v in sorted(erp["no_entran"].items()))
             print(f"  lista del ERP publicada ({erp['archivo']}): {erp['creados']} productos nuevos "
                   f"con stock, precio ERP actualizado en {erp['actualizados']:,}. "
+                  f"Quedan fuera: {fuera}.")
+        # Despues del export del ERP y antes del recalculo: lo que entra hoy nace
+        # con precio en esta misma corrida.
+        alt = publicar_con_reintentos("las altas desde el stock", publicar_altas_desde_stock)
+        if alt:
+            fuera = ", ".join(f"{k} {v:,}" for k, v in sorted(alt["no_entran"].items()))
+            print(f"  altas desde el stock ({alt['archivo']}): {alt['creados']} productos nuevos "
+                  f"en la lista de precios, precio ERP al dia en {alt['actualizados']:,}. "
                   f"Quedan fuera: {fuera}.")
         pre = publicar_con_reintentos("el recalculo de precios", recalcular_precios)
         if pre:
