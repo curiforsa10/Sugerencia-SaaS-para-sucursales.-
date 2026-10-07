@@ -105,6 +105,10 @@ def test_el_archivo_se_encuentra_por_su_nombre_y_no_se_confunde(tmp_path, monkey
     _erp_xlsx(tmp_path, [_fila("17 A", "X", 1, 1, 1)])
     (tmp_path / "LISTA DE PRECIOS.xlsx").write_bytes(b"")
     (tmp_path / "Lista de precio ford al 28.07.2026.xlsx").write_bytes(b"")
+    # Desde que los crudos pueden estar en varias carpetas (7ca3765) la busqueda
+    # recorre CRUDOS_DIRS; parchar solo CRUDOS_DIR dejaba al test leyendo el
+    # lista_erp.xlsx real de este PC (83 creados en vez de 1).
+    monkeypatch.setattr(fuentes, "CRUDOS_DIRS", [tmp_path])
     monkeypatch.setattr(fuentes, "CRUDOS_DIR", tmp_path)
 
     assert fuentes.ruta_de("lista_erp").name == "lista_erp.xlsx"
@@ -121,6 +125,10 @@ def entorno(tmp_path, monkeypatch):
         _fila("17 A", "AMORTIGUADOR", 3, 1000, 1780),
         _fila("17 B", "BUJIA", 0, 500, 900),
     ])
+    # Desde que los crudos pueden estar en varias carpetas (7ca3765) la busqueda
+    # recorre CRUDOS_DIRS; parchar solo CRUDOS_DIR dejaba al test leyendo el
+    # lista_erp.xlsx real de este PC (83 creados en vez de 1).
+    monkeypatch.setattr(fuentes, "CRUDOS_DIRS", [tmp_path])
     monkeypatch.setattr(fuentes, "CRUDOS_DIR", tmp_path)
     monkeypatch.setattr(job, "MARCA_LISTA_ERP", tmp_path / "marca.txt")
     enviados: list[list[dict]] = []
@@ -180,6 +188,10 @@ def test_un_lote_caido_no_deja_la_marca(entorno, monkeypatch):
 def test_sin_archivo_no_es_un_fallo(tmp_path, monkeypatch):
     from src.motor import fuentes
 
+    # Desde que los crudos pueden estar en varias carpetas (7ca3765) la busqueda
+    # recorre CRUDOS_DIRS; parchar solo CRUDOS_DIR dejaba al test leyendo el
+    # lista_erp.xlsx real de este PC (83 creados en vez de 1).
+    monkeypatch.setattr(fuentes, "CRUDOS_DIRS", [tmp_path])
     monkeypatch.setattr(fuentes, "CRUDOS_DIR", tmp_path)
     monkeypatch.setattr(job, "MARCA_LISTA_ERP", tmp_path / "marca.txt")
 
