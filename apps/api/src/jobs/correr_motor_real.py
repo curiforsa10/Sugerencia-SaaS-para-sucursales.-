@@ -1177,6 +1177,39 @@ def publicar_altas_desde_stock() -> dict | None:
     return _publicar_al_feed_erp("las altas desde el stock", ruta, MARCA_STOCK_PRECIOS)
 
 
+def publicar_reglas_manuales() -> dict | None:
+    """Pide a la plataforma que aplique hoy las reglas de sugerencias manuales.
+
+    Son las de "nunca menos de N unidades" y "que alcance para N dias": cada dia
+    se recalculan con el stock, lo que viene en camino y lo que pide el sistema,
+    por eso van DESPUES de publicar el sugerido, el stock y el transito.
+
+    Hasta el 08-10-2026 las aplicaba un workflow de GitHub que fallaba con 403
+    todos los dias (no tenia el secreto): una regla se calculaba el dia en que se
+    creaba y nunca mas. Llamarlo dos veces el mismo dia no repite nada.
+    """
+    import httpx
+
+    base, email, password = _credenciales()
+    if not email or not password:
+        return None
+    try:
+        with httpx.Client(timeout=300) as c:
+            token = _token(c, base, email, password)
+            r = c.post(
+                f"{base}/api/admin/procesar-recurrentes",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if r.status_code == 404:
+                # Plataforma sin el endpoint desplegado todavia: no es un fallo.
+                return None
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:  # noqa: BLE001
+        fallo_publicacion("las reglas de sugerencias manuales", e)
+        return None
+
+
 def recalcular_precios() -> dict | None:
     """Recalcula la lista de precios con el costo, stock y compras recien subidos.
 
@@ -1794,6 +1827,14 @@ def _run(oficial: bool = False, ignorar_frescura: bool = False) -> int:
         elif vta:
             print(f"  ventas publicadas: {vta.get('filas_cargadas')} filas "
                   f"(periodos {', '.join(vta.get('periodos') or [])}).")
+        # Las reglas de sugerencias manuales, con el sugerido, el stock y el
+        # transito de hoy ya arriba.
+        reg = publicar_con_reintentos("las reglas de sugerencias manuales",
+                                      publicar_reglas_manuales)
+        if reg:
+            print(f"  reglas de sugerencias manuales: {reg.get('recurrencias_procesadas')} "
+                  f"aplicadas, {reg.get('sugerencias_creadas')} sugerencias, "
+                  f"{reg.get('expiradas_archivadas')} vencidas archivadas.")
         # Equivalencia codigo Curifor -> SKU del portal, para armar el archivo de
         # carga masiva sin que el comprador convierta codigos a mano.
         sku = publicar_con_reintentos("la equivalencia de SKU", publicar_sku_proveedor,
