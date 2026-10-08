@@ -53,6 +53,10 @@ SALIDA = _API_DIR / "data" / "sugerido_motor.csv"
 SALIDA_LT = _API_DIR / "data" / "lead_time_motor.csv"
 SALIDA_STOCK = _API_DIR / "data" / "stock_unificado_motor.csv"
 SALIDA_TRANSITO = _API_DIR / "data" / "stock_transito_motor.csv"
+SALIDA_OC = _API_DIR / "data" / "oc_recientes_motor.csv"
+# Cuantos dias de OC se mandan a la plataforma para cerrar las sugerencias de una
+# sola vez ya compradas. Cubre de sobra el plazo mas largo del modal (30 dias).
+DIAS_OC_RECIENTES = 90
 SALIDA_COSTOS = _API_DIR / "data" / "costos_precios_motor.csv"
 SALIDA_COMPRAS = _API_DIR / "data" / "compras_precios_motor.csv"
 # Cuando se publico por ultima vez el export del ERP (mtime del archivo). Son
@@ -335,6 +339,8 @@ def construir_csv(hoy: date | None = None) -> Path:
     _guardar_compras_precios()
     # El transito de TODOS los productos, no solo de los que el sugerido evalua.
     _guardar_transito(fuentes)
+    # Las OC recientes, para cerrar en la plataforma lo de una sola vez ya comprado.
+    _guardar_oc_recientes(fuentes)
     # Las fuentes quedan a mano para que `run` publique la equivalencia de SKU
     # sin volver a leer los Excel (son minutos de lectura).
     globals()['_ULTIMAS_FUENTES'] = fuentes
@@ -410,6 +416,103 @@ def _guardar_transito(fuentes: dict) -> Path | None:
          "stock_transito": "cantidad"}
     ).write_csv(SALIDA_TRANSITO)
     return SALIDA_TRANSITO
+
+
+def _guardar_oc_recientes(fuentes: dict, hoy=None) -> Path | None:
+    """Escribe las OC de los ultimos `DIAS_OC_RECIENTES` dias, una fila por OC.
+
+    La plataforma las usa para cerrar las sugerencias manuales de una sola vez que
+    ya se compraron (08-10-2026). Nadie aprieta "Marcar como pedido": sin esto, lo
+    de una sola vez seguia sumando despues de comprado y la descarga siguiente lo
+    volvia a pedir.
+
+    Van TODAS las OC, de cualquier motivo y estado: los pedidos especiales se
+    compran como "compra calzada", que el transito no cuenta, y una OC ya recibida
+    tambien es una compra. Quedan fuera las anuladas y las que no dicen sucursal
+    (las de importacion vienen sin ella): sin sucursal no hay con que comparar.
+    """
+    from datetime import date as _date, timedelta as _timedelta
+
+    import polars as pl
+
+    from ..motor.conectores.sql_flexline import SUCURSAL_ID_DEFAULT
+
+    seg = fuentes.get("seguimiento_transito")
+    if seg is None or seg.is_empty():
+        return None
+    hoy = hoy or _date.today()
+    desde = hoy - _timedelta(days=DIAS_OC_RECIENTES)
+    estado = pl.col("EstadoOC").fill_null("").str.to_lowercase()
+    df = (
+        seg.filter(
+            pl.col("FechaOC").is_not_null()
+            & (pl.col("FechaOC") >= desde)
+            & pl.col("Producto").is_not_null()
+            & pl.col("NOC").is_not_null()
+            & pl.col("SucursalID").is_not_null()
+            & (pl.col("SucursalID") != SUCURSAL_ID_DEFAULT)
+            & (pl.col("Cantidad").fill_null(0) > 0)
+            & ~estado.str.contains("anul")
+        )
+        .with_columns(pl.col("Producto").str.strip_chars())
+        .group_by(["Producto", "SucursalID", "NOC", "FechaOC"])
+        .agg(
+            pl.col("Cantidad").cast(pl.Float64).sum().alias("cantidad"),
+            pl.col("Motivo").first().alias("motivo"),
+            pl.col("Origen").first().alias("origen"),
+        )
+        .rename({"Producto": "producto", "SucursalID": "sucursal_id",
+                 "NOC": "n_oc", "FechaOC": "fecha_oc"})
+        .sort(["fecha_oc", "n_oc", "producto"])
+    )
+    if df.is_empty():
+        return None
+    SALIDA_OC.parent.mkdir(parents=True, exist_ok=True)
+    df.write_csv(SALIDA_OC)
+    return SALIDA_OC
+
+
+def publicar_oc_recientes() -> dict | None:
+    """Manda las OC recientes; la plataforma cierra lo de una sola vez ya comprado."""
+    import csv
+
+    import httpx
+
+    if not SALIDA_OC.exists():
+        return None
+    base, email, password = _credenciales()
+    if not email or not password:
+        return None
+    with open(SALIDA_OC, encoding="utf-8", newline="") as f:
+        filas = [
+            {
+                "producto": r["producto"],
+                "sucursal_id": r["sucursal_id"],
+                "n_oc": r["n_oc"],
+                "fecha_oc": (r.get("fecha_oc") or "")[:10],
+                "cantidad": float(r["cantidad"]),
+                "motivo": r.get("motivo") or None,
+                "origen": r.get("origen") or None,
+            }
+            for r in csv.DictReader(f)
+            if r.get("producto") and r.get("cantidad")
+        ]
+    try:
+        with httpx.Client(timeout=300) as c:
+            token = _token(c, base, email, password)
+            r = c.post(
+                f"{base}/api/admin/oc-recientes",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"filas": filas},
+            )
+            if r.status_code == 404:
+                # Plataforma sin el endpoint desplegado todavia: no es un fallo.
+                return None
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:  # noqa: BLE001 - publicar las OC nunca debe romper la carga
+        fallo_publicacion("las OC recientes", e)
+        return None
 
 
 def publicar_transito() -> dict | None:
@@ -1819,6 +1922,12 @@ def _run(oficial: bool = False, ignorar_frescura: bool = False) -> int:
         tra = publicar_con_reintentos("el transito", publicar_transito)
         if tra:
             print(f"  transito publicado: {tra.get('filas_cargadas')} filas.")
+        # Las OC recientes: cierran lo de una sola vez que ya se compro, para que la
+        # descarga siguiente del sugerido no lo vuelva a pedir.
+        ocs = publicar_con_reintentos("las OC recientes", publicar_oc_recientes)
+        if ocs:
+            print(f"  OC recientes: {ocs.get('lineas_recibidas')} OC; "
+                  f"{ocs.get('sugerencias_cerradas')} sugerencias de una sola vez cerradas.")
         # Los meses de venta que la plataforma no tenga. Normalmente ninguno; al
         # pegar un mes nuevo en el respaldo, ese mes.
         vta = publicar_con_reintentos("las ventas", publicar_ventas_historicas)
