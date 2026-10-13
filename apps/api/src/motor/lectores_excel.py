@@ -794,6 +794,12 @@ def leer_lista_erp(ruta) -> pl.DataFrame:
     "Tipo" aparece dos veces en el encabezado (REPUESTOS/GASTO/MO_TERC y el tipo
     de repuesto); se toma la primera, que es la que distingue un repuesto de un
     servicio.
+
+    El producto se cruza sin espacios en los bordes, pero en el ERP hay codigos
+    creados con un espacio al final ("15 MXD1454M ": 82 en el stock del
+    09-10-2026). `codigo_erp` trae el codigo tal cual, solo cuando difiere (None
+    si no): la plataforma lo usa en los archivos que se suben al ERP. Si alguna
+    fila del producto trae el codigo limpio, va None: el ERP lo tiene limpio.
     """
     import polars as pl
 
@@ -804,9 +810,11 @@ def leer_lista_erp(ruta) -> pl.DataFrame:
         raise ValueError(f"Al export del ERP le faltan columnas: {sorted(faltan)}")
     df = df.select([pl.col(c).alias(n) for c, n in COLUMNAS_LISTA_ERP.items()])
     return (
-        df.with_columns(pl.col("producto").cast(pl.Utf8).str.strip_chars())
+        df.with_columns(pl.col("producto").cast(pl.Utf8).alias("codigo_erp"))
+        .with_columns(pl.col("producto").cast(pl.Utf8).str.strip_chars())
         .filter(pl.col("producto").is_not_null() & (pl.col("producto") != ""))
-        .with_columns(_numero_cl("stock"), _numero_cl("costo"), _numero_cl("precio_erp"))
+        .with_columns(_numero_cl("stock"), _numero_cl("costo"), _numero_cl("precio_erp"),
+                      (pl.col("codigo_erp") == pl.col("producto")).alias("_limpio"))
         .group_by("producto", maintain_order=True)
         .agg(
             pl.col("glosa").cast(pl.Utf8).first(),
@@ -815,5 +823,12 @@ def leer_lista_erp(ruta) -> pl.DataFrame:
             pl.col("precio_erp").max(),
             pl.col("tipo_erp").cast(pl.Utf8).first(),
             pl.col("procedencia").cast(pl.Utf8).first(),
+            pl.col("codigo_erp").first(),
+            pl.col("_limpio").any(),
         )
+        .with_columns(
+            pl.when(pl.col("_limpio")).then(pl.lit(None, dtype=pl.Utf8))
+            .otherwise(pl.col("codigo_erp")).alias("codigo_erp")
+        )
+        .drop("_limpio")
     )

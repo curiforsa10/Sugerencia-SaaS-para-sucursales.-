@@ -11,6 +11,8 @@ Lo que estos tests cuidan:
 2. Que se publique SOLO cuando el archivo cambio. Son 80 lotes; mandarlos todos
    los dias por gusto es lo que hace que una carga de 15 minutos dure 25.
 3. Que un lote caido no deje la marca escrita: manana se reintenta entero.
+4. Que el codigo con espacio al final llegue tal cual en `codigo_erp`: es el que
+   tiene que salir en el archivo que se sube al ERP.
 """
 from pathlib import Path
 
@@ -79,7 +81,38 @@ def test_las_columnas_que_viajan_son_las_que_espera_la_plataforma(tmp_path):
     ruta = _erp_xlsx(tmp_path, [_fila("17 A", "X", 1, 1, 1)])
 
     assert set(lx.leer_lista_erp(ruta).columns) == {
-        "producto", "glosa", "stock", "costo", "precio_erp", "tipo_erp", "procedencia"}
+        "producto", "glosa", "stock", "costo", "precio_erp", "tipo_erp", "procedencia",
+        "codigo_erp"}
+
+
+def test_el_codigo_con_espacio_al_final_viaja_tal_cual(tmp_path):
+    """En el ERP hay codigos creados con un espacio al final. Por dentro se cruzan
+    sin el espacio, pero el archivo que se sube al ERP tiene que llevarlo: viaja
+    aparte, en `codigo_erp`, y solo cuando difiere (13-10-2026)."""
+    ruta = _erp_xlsx(tmp_path, [
+        _fila("15 MXD1454M ", "BALATA", 2, 1000, 1780),   # lote 1
+        _fila("15 MXD1454M ", "BALATA", 1, 1000, 1780),   # lote 2
+        _fila("17 A", "AMORTIGUADOR", 3, 1000, 1780),
+    ])
+
+    por = {r["producto"]: r for r in lx.leer_lista_erp(ruta).to_dicts()}
+
+    assert set(por) == {"15 MXD1454M", "17 A"}
+    assert por["15 MXD1454M"]["codigo_erp"] == "15 MXD1454M "
+    assert por["15 MXD1454M"]["stock"] == 3
+    assert por["17 A"]["codigo_erp"] is None
+
+
+def test_si_el_erp_tambien_trae_el_codigo_limpio_va_el_limpio(tmp_path):
+    """Si una fila del producto trae el codigo sin espacio, el ERP lo tiene asi."""
+    ruta = _erp_xlsx(tmp_path, [
+        _fila("17 B ", "BUJIA", 1, 500, 900),
+        _fila("17 B", "BUJIA", 1, 500, 900),
+    ])
+
+    (fila,) = lx.leer_lista_erp(ruta).to_dicts()
+
+    assert fila["producto"] == "17 B" and fila["codigo_erp"] is None
 
 
 def test_sin_las_columnas_del_erp_se_dice_cuales_faltan(tmp_path):
@@ -264,7 +297,8 @@ def test_el_stock_del_dia_va_por_el_mismo_feed_que_el_erp(stock_del_dia):
     assert set(filas) == {"17 NUEVO", "17 YA"}
     assert filas["17 NUEVO"]["costo"] == 1000.5, "nace con costo, o sea con precio"
     assert set(filas["17 NUEVO"]) == {
-        "producto", "glosa", "stock", "costo", "precio_erp", "tipo_erp", "procedencia"}
+        "producto", "glosa", "stock", "costo", "precio_erp", "tipo_erp", "procedencia",
+        "codigo_erp"}
 
 
 def test_el_mismo_stock_no_se_manda_dos_veces(stock_del_dia):
