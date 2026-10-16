@@ -32,6 +32,11 @@ import polars as pl
 # Filas que se escanean buscando los encabezados antes de darse por vencido.
 MAX_FILAS_ESCANEO = 40
 
+# Lo que leyo cada lector en esta corrida, por ruta: {filas, hoja, fila_encabezado}.
+# Lo usan el panel de Fuentes de datos ("19.883 filas", "hoja 'Hoja1', fila 1") y
+# la guarda que frena un stock que llego vacio. `config_fuentes` lo vacia al partir.
+LECTURAS: dict[str, dict] = {}
+
 
 def _norm(s: object) -> str:
     """Nombre de columna comparable: sin tildes, sin simbolos, minusculas.
@@ -135,6 +140,8 @@ def leer_reporte(
             for destino in columnas:
                 j = indices.get(destino)
                 datos[destino].append(None if j is None else fila[j])
+        LECTURAS[str(ruta)] = {"filas": len(next(iter(datos.values()), [])),
+                               "hoja": ws.title, "fila_encabezado": i + 1}
     finally:
         wb.close()
 

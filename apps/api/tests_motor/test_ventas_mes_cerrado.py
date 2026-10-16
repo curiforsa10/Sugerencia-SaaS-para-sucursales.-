@@ -87,8 +87,11 @@ def _corrida(monkeypatch, tmp_path, venta, ignorar=False):
     # Los pasos posteriores no importan aca: se apagan TODOS, tambien los que se
     # agreguen despues. La lista a mano dejo pasar `publicar_altas_desde_stock`
     # el 07-10-2026 y el test publico 316 productos en produccion.
-    apagar = {n for n in dir(job) if n.startswith("publicar_") and n != "publicar_con_reintentos"}
-    apagar |= {"recargar_instock", "recalcular_precios", "obtener_config"}
+    # `preparar_fuentes` tambien: pide la configuracion de fuentes a la plataforma.
+    apagar = {n for n in dir(job)
+              if n.startswith(("publicar_", "obtener_config", "preparar_fuentes"))
+              and n != "publicar_con_reintentos"}
+    apagar |= {"recargar_instock", "recalcular_precios"}
     for nombre in sorted(apagar):
         monkeypatch.setattr(job, nombre, lambda *a, **k: None)
     codigo = job.run(oficial=True, ignorar_frescura=ignorar)

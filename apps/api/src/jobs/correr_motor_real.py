@@ -46,6 +46,7 @@ _API_DIR = Path(__file__).resolve().parents[2]
 # Tener aqui una copia de esa logica hacia que el job leyera el stock y el
 # seguimiento de la carpeta buena y las VENTAS de la copia vieja de data/crudos.
 from ..motor import fuentes as _fuentes  # noqa: E402
+from ..motor import config_fuentes as _cf  # noqa: E402
 
 CRUDOS_DIR = _fuentes.CRUDOS_DIR
 SNAPSHOT_DIR = Path(os.environ.get("MOTOR_SNAPSHOT_DIR", _API_DIR / "data" / "paridad"))
@@ -79,7 +80,8 @@ def _leer_env() -> dict[str, str]:
     if not env.exists():
         return {}
     valores = {}
-    for linea in env.read_text(encoding="utf-8", errors="ignore").splitlines():
+    # utf-8-sig: el .env de este PC parte con BOM (ver `fuentes._valor_env`).
+    for linea in env.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
         linea = linea.strip()
         if linea.startswith("PLATAFORMA_") and "=" in linea:
             k, v = linea.split("=", 1)
@@ -252,26 +254,25 @@ def _archivos_de_ventas(fin_mes_cerrado: date) -> list[Path]:
     el sugerido solo mira los 12 meses cerrados: para jul-2026 alcanzan 2026 y
     2025. Cargar 2018-2024 ademas seria minutos de lectura para nada.
     """
-    anios = {str(fin_mes_cerrado.year), str(fin_mes_cerrado.year - 1)}
-    if not CRUDOS_DIR.exists():
-        return []
     # Los respaldos se identifican POR DESCARTE: se llaman "2025 (4).xlsx" y no hay
     # patron que los reconozca, pero si se sabe que no son stock, ni seguimiento, ni
     # el mix, ni las ventas de Frontera (que tienen otro esquema y otros filtros).
-    from ..motor import lectores_excel
-
-    candidatos = sorted(
-        p for p in CRUDOS_DIR.rglob("*.xlsx")
-        if not p.name.startswith("~$")
-        and not _fuentes.es_de_alguna_fuente(p.name, excepto="ventas")
-        and any(a in p.name for a in anios)
-    )
+    # La seleccion vive en `config_fuentes.seleccion_de_ventas`, la misma que usa
+    # la configuracion de la plataforma.
+    #
+    # Con un manifiesto fijado se devuelve lo que se eligio al partir: se resuelve
+    # una sola vez por corrida, y los dos llamadores leen las mismas copias.
+    m = _fuentes.manifiesto_fijado()
+    if m is not None and m.cubre("ventas"):
+        ventas, descartados = m.ventas()
+    else:
+        ventas, rechazados = _cf.seleccion_de_ventas([(CRUDOS_DIR, True)], fin_mes_cerrado)
+        descartados = [p.name for p in rechazados]
     # El descarte va ACA y no en el llamador: esta funcion la usan `construir_csv`
     # y `publicar_ventas_historicas`, y filtrar en uno solo dejaba al otro roto.
     # Paso el 08-09-2026: el sugerido publico bien y la carga de ventas se cayo
     # con el mismo archivo.
-    ventas = [p for p in candidatos if lectores_excel.parece_respaldo_de_venta(p)]
-    for nombre in (p.name for p in candidatos if p not in ventas):
+    for nombre in descartados:
         aviso = (f"'{nombre}' esta en la carpeta de crudos pero no tiene forma de "
                  "respaldo de venta: se ignoro. Si SI lo es, cambio de formato.")
         if aviso not in _AVISOS_FUENTES:
@@ -1729,7 +1730,7 @@ def revisar_frescura(hoy: date | None = None) -> list[str]:
 
     hoy = hoy or date.today()
     viejos = []
-    for fuente, dias in FRESCURA_DIAS.items():
+    for fuente, (dias, solo_avisa) in _plazos_de_frescura().items():
         try:
             ruta = fuentes.ruta_de(fuente)
         except FileNotFoundError:
@@ -1737,10 +1738,19 @@ def revisar_frescura(hoy: date | None = None) -> list[str]:
         edad = dias_habiles(date.fromtimestamp(ruta.stat().st_mtime), hoy)
         if edad > dias:
             aviso = f"{ruta.name}: {edad} dias habiles (se espera al dia cada {dias})"
-            if fuente in FRESCURA_SOLO_AVISA:
+            if solo_avisa:
                 aviso += " - no frena la carga"
             viejos.append(aviso)
     return viejos
+
+
+def _plazos_de_frescura() -> dict[str, tuple[int, bool]]:
+    """{fuente: (dias habiles, solo avisa)}. En modo `activa` salen de la
+    configuracion de la plataforma (Fuentes de datos); si no, de las constantes."""
+    m = _fuentes.manifiesto_fijado()
+    if m is not None and m.resolucion == "plataforma":
+        return m.plazos()
+    return {f: (d, f in FRESCURA_SOLO_AVISA) for f, d in FRESCURA_DIAS.items()}
 
 
 def frescura_que_frena(hoy: date | None = None) -> list[str]:
@@ -1749,8 +1759,15 @@ def frescura_que_frena(hoy: date | None = None) -> list[str]:
     Se separa de `revisar_frescura` para que el aviso se siga viendo en el log aun
     cuando el archivo no frene nada: el dato viejo se informa igual, lo que cambia
     es que ya no bloquea la corrida entera.
+
+    En modo `activa` tambien frena lo que la configuracion pide y no esta: una
+    fuente obligatoria sin archivo, una carpeta que este PC no tiene, o dos
+    fuentes que eligieron el mismo archivo. En los otros modos eso no frena nada:
+    hoy un archivo que falta se salta en silencio, y asi sigue hasta activar.
     """
-    return [v for v in revisar_frescura(hoy) if "no frena la carga" not in v]
+    frena = [v for v in revisar_frescura(hoy) if "no frena la carga" not in v]
+    m = _fuentes.manifiesto_fijado()
+    return frena + (m.bloqueos() if m is not None else [])
 
 
 # Desde que dia del mes la falta del mes cerrado FRENA la carga. Los primeros dias
@@ -1759,7 +1776,8 @@ def frescura_que_frena(hoy: date | None = None) -> list[str]:
 DIA_DESDE_QUE_FRENA_VENTAS = 4
 
 
-def revisar_ventas_mes_cerrado(csv_path, hoy: date | None = None) -> tuple[str | None, str | None]:
+def revisar_ventas_mes_cerrado(csv_path, hoy: date | None = None,
+                               corrida: dict | None = None) -> tuple[str | None, str | None]:
     """(aviso, bloqueo): si el CSV recien calculado trae el ultimo mes cerrado
     SIN ventas.
 
@@ -1772,6 +1790,9 @@ def revisar_ventas_mes_cerrado(csv_path, hoy: date | None = None) -> tuple[str |
 
     Se mira el EFECTO (la columna del CSV) y no el archivo: asi da lo mismo si las
     ventas vienen del Excel, del SQL o del snapshot.
+
+    `corrida`: si viene, guarda ahi el periodo y el total para el panel de
+    Fuentes de datos ("Ventas sin el mes cerrado").
     """
     import csv
 
@@ -1785,6 +1806,8 @@ def revisar_ventas_mes_cerrado(csv_path, hoy: date | None = None) -> tuple[str |
                 total += float(r.get("Venta Mes 01") or 0)
             except ValueError:
                 pass
+    if corrida is not None:
+        corrida["ventas"] = {"periodo_ultimo_mes": periodo, "total_mes_cerrado": total}
     if not filas or total > 0:
         return None, None
     mes = f"{periodo[4:6]}-{periodo[:4]}" if periodo and len(periodo) == 6 else str(periodo)
@@ -1861,22 +1884,104 @@ def run(oficial: bool = False, ignorar_frescura: bool = False) -> int:
         soltar_candado()
 
 
+def preparar_fuentes(corrida: dict):
+    """El manifiesto de la corrida (ver `config_fuentes.preparar_fuentes`)."""
+    return _cf.preparar_fuentes(corrida, carpeta_ventas=CRUDOS_DIR)
+
+
+def publicar_reporte_fuentes(corrida: dict) -> bool:
+    """Manda al panel de Fuentes de datos como termino la corrida.
+
+    Nunca lanza `Exception` y no pasa por `_FALLOS`: el reporte no es parte de la
+    publicacion, y si la plataforma no lo recibe queda pendiente para la corrida
+    siguiente. Una corrida que ya publico no puede quedar "incompleta" por esto.
+    """
+    try:
+        corrida["terminada_en"] = _cf._ahora_iso()
+        return _cf.enviar_reporte(_cf.payload_de_reporte(corrida, "fin"))
+    except Exception as e:  # noqa: BLE001
+        print(f"  (no se pudo armar el reporte de fuentes: {type(e).__name__}: {e})")
+        return False
+
+
+def publicar_reportes_pendientes() -> int:
+    """Reenvia los reportes de fuentes que no se pudieron mandar (incluida la
+    corrida anterior, si se corto a mitad). Nunca lanza."""
+    try:
+        return _cf.reenviar_pendientes()
+    except Exception as e:  # noqa: BLE001
+        print(f"  (no se pudieron reenviar los reportes de fuentes pendientes: {e})")
+        return 0
+
+
 def _run(oficial: bool = False, ignorar_frescura: bool = False) -> int:
+    # El reporte de fuentes va aca y no en `run`: los tests del candado parchan
+    # `_run` y llaman a `run`.
+    corrida = _cf.nueva_corrida(oficial)
+    try:
+        codigo = _correr(corrida, oficial=oficial, ignorar_frescura=ignorar_frescura)
+        if corrida["resultado"] == "en_curso":
+            corrida["resultado"] = "ok" if codigo == 0 else "fallo"
+        return codigo
+    except BaseException:
+        corrida["resultado"] = "cortada"
+        raise
+    finally:
+        publicar_reporte_fuentes(corrida)
+        _fuentes.soltar_manifiesto()
+        _cf.borrar_corrida_en_curso()
+
+
+def _correr(corrida: dict, oficial: bool = False, ignorar_frescura: bool = False) -> int:
     print(f"Crudos: {CRUDOS_DIR}")
+
+    # Antes de mirar ningun archivo: lo que quedo sin reportar, y despues el
+    # manifiesto (que archivo lee cada fuente). Si el modulo de fuentes falla, la
+    # corrida sigue como siempre: nunca deja al motor sin correr.
+    publicar_reportes_pendientes()
+    try:
+        manifiesto = preparar_fuentes(corrida)
+    except Exception as e:  # noqa: BLE001
+        manifiesto = None
+        corrida.setdefault("avisos", []).append(
+            f"No se pudo preparar el manifiesto de fuentes y se leyo como siempre: "
+            f"{type(e).__name__}: {e}")
+        print(f"  (fuentes de datos: no se pudo preparar el manifiesto, se sigue como siempre: {e})")
+    if manifiesto is not None:
+        if oficial and not manifiesto.es_titular:
+            # La guarda de PC titular: con dos PCs con la tarea programada, solo
+            # uno publica. Este deja su reporte y sale limpio, sin incidencia.
+            texto = ("NO SE PUBLICA: este PC no es el titular "
+                     f"({manifiesto.alias_titular or manifiesto.pc_titular})")
+            print(texto)
+            corrida["resultado"], corrida["motivo"] = "no_titular", texto
+            return 0
+        _fuentes.fijar_manifiesto(manifiesto)
 
     viejos = revisar_frescura()
     for v in viejos:
         print(f"  DESACTUALIZADO: {v}")
     # Solo la corrida oficial avisa: el modo sombra es una prueba y ensuciaria
     # las incidencias del equipo.
-    def _fallar(motivo: str, detalle: str = "") -> int:
+    def _fallar(motivo: str, detalle: str = "", resultado: str = "frenada") -> int:
         print(f"ERROR: {motivo}\n{detalle}".rstrip(), file=sys.stderr)
+        # frenada: un dato malo (frescura, ventas, un archivo que falta); fallo:
+        # el calculo o la plataforma.
+        corrida["resultado"] = resultado
+        corrida["motivo"] = f"{motivo}\n{detalle}".rstrip()
         if oficial and avisar_falla(motivo, detalle):
             print("  incidencia dejada en la plataforma (los admin ven la campanita).")
         return 1
 
     bloqueantes = frescura_que_frena()
     if bloqueantes and oficial and not ignorar_frescura:
+        if manifiesto is not None and manifiesto.bloqueos():
+            return _fallar(
+                "No se carga a produccion: faltan archivos o estan desactualizados.",
+                "Problemas:\n  - " + "\n  - ".join(bloqueantes)
+                + "\n\nRevisalos en Fuentes de datos, o corre con "
+                "--ignorar-frescura si sabes que asi corresponde.",
+            )
         return _fallar(
             "No se carga a produccion con archivos desactualizados.",
             "Archivos vencidos:\n  - " + "\n  - ".join(bloqueantes)
@@ -1887,10 +1992,20 @@ def _run(oficial: bool = False, ignorar_frescura: bool = False) -> int:
     try:
         csv_path = construir_csv()
     except Exception as e:  # noqa: BLE001
-        return _fallar("El motor no pudo calcular el sugerido.", f"{type(e).__name__}: {e}")
+        return _fallar("El motor no pudo calcular el sugerido.", f"{type(e).__name__}: {e}",
+                       resultado="fallo")
     print(f"CSV generado: {csv_path}")
 
-    aviso_ventas, bloqueo_ventas = revisar_ventas_mes_cerrado(csv_path)
+    # Solo en modo `activa`: los dos stocks y el seguimiento nacional no pueden
+    # llegar vacios ni con menos del 60 % de las filas de la corrida anterior.
+    if manifiesto is not None:
+        from ..motor import lectores_excel
+
+        bloqueo_filas = manifiesto.revisar_filas(lectores_excel.LECTURAS)
+        if bloqueo_filas and oficial and not ignorar_frescura:
+            return _fallar("Un archivo llegó vacío o incompleto", bloqueo_filas)
+
+    aviso_ventas, bloqueo_ventas = revisar_ventas_mes_cerrado(csv_path, corrida=corrida)
     if aviso_ventas:
         print(f"  AVISO: {aviso_ventas}")
     if bloqueo_ventas and oficial and not ignorar_frescura:
@@ -1903,9 +2018,11 @@ def _run(oficial: bool = False, ignorar_frescura: bool = False) -> int:
         return _fallar(
             "El motor calculo bien, pero la plataforma rechazo la carga.",
             f"{type(e).__name__}: {e}",
+            resultado="fallo",
         )
 
     if oficial:
+        corrida["publico"] = True
         print(f"CARGA OFICIAL: {resultado.get('filas_cargadas')} filas.")
         for a in resultado.get("advertencias", []):
             print(f"  advertencia: {a}")
@@ -2013,6 +2130,8 @@ def _run(oficial: bool = False, ignorar_frescura: bool = False) -> int:
         print(detalle, file=sys.stderr)
         print("Los datos de la plataforma pueden estar inconsistentes entre si. "
               "Corre el motor de nuevo cuando la plataforma responda.", file=sys.stderr)
+        corrida["resultado"] = "incompleta"
+        corrida["motivo"] = "La carga oficial quedo incompleta. No se publico:\n" + detalle
         if avisar_falla(
             f"La carga oficial quedo incompleta: fallaron {len(_FALLOS)} paso(s) "
             "de publicacion.",

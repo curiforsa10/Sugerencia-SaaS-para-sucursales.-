@@ -329,5 +329,6 @@ def test_las_altas_van_antes_del_recalculo():
     """Si fueran despues, lo nuevo pasaria un dia entero sin precio."""
     import inspect
 
-    fuente = inspect.getsource(job._run)
+    # La secuencia de la corrida vive en `_correr`; `_run` solo la envuelve.
+    fuente = inspect.getsource(job._correr)
     assert fuente.index("publicar_altas_desde_stock") < fuente.index("recalcular_precios)")

@@ -134,6 +134,7 @@ def test_una_plataforma_sin_el_endpoint_no_es_un_fallo(monkeypatch, tmp_path):
 
 
 def test_van_despues_del_transito_y_antes_de_las_reglas():
-    fuente = inspect.getsource(job._run)
+    # La secuencia de la corrida vive en `_correr`; `_run` solo la envuelve.
+    fuente = inspect.getsource(job._correr)
     i = fuente.index("publicar_oc_recientes")
     assert fuente.index("publicar_transito") < i < fuente.index("publicar_reglas_manuales")

@@ -107,6 +107,11 @@ def leer_stock(ruta_excel: str | Path) -> pl.DataFrame:
             costos.append(row[ic] if ic is not None else None)
             # Familia trae "RUBRO N": de ahi sale el rubro que define FILTRO1_Final.
             familias.append(row[ifam] if ifam is not None else None)
+        # Para el panel de Fuentes de datos y la guarda del stock vacio.
+        from .lectores_excel import LECTURAS
+
+        LECTURAS[str(Path(ruta_excel))] = {"filas": len(prods), "hoja": ws.title,
+                                            "fila_encabezado": 1}
     finally:
         wb.close()
 

@@ -67,7 +67,8 @@ def test_una_plataforma_sin_el_endpoint_no_es_un_fallo(monkeypatch):
 
 def test_va_despues_del_stock_y_del_transito():
     """Con los datos de ayer la regla pediria lo que ya se compro."""
-    fuente = inspect.getsource(job._run)
+    # La secuencia de la corrida vive en `_correr`; `_run` solo la envuelve.
+    fuente = inspect.getsource(job._correr)
     i = fuente.index("publicar_reglas_manuales")
     assert fuente.index("publicar_stock_unificado") < i
     assert fuente.index("publicar_transito") < i

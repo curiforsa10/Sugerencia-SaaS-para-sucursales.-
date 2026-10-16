@@ -28,25 +28,36 @@ _API_DIR = pathlib.Path(__file__).resolve().parents[2]
 _REPO_DIR = _API_DIR.parents[1]
 
 
-def _carpetas_de(variable: str) -> list[pathlib.Path]:
-    """Las carpetas de una variable, separadas por `;`: del entorno o del .env del repo.
-
-    Una variable PRESENTE pero vacia cuenta como "ninguna carpeta" y no cae al
-    .env: asi los tests se aislan de la configuracion de este PC.
+def _valor_env(variable: str) -> str | None:
+    """El valor de una variable: del entorno o del .env del repo. None si no esta.
 
     El .env se lee a mano (sin dependencias) porque el motor corre tambien fuera
     de la API, donde no hay pydantic-settings cargando la configuracion.
+
+    `utf-8-sig` y no `utf-8`: el .env de este PC parte con BOM, y con `utf-8` la
+    primera linea llega como "\\ufeffVARIABLE=..." y no calza con nada. Hoy no
+    falla solo porque la primera variable esta en la linea 4.
     """
     valor = os.environ.get(variable)
     if valor is None:
         env = _REPO_DIR / ".env"
         if env.exists():
-            for linea in env.read_text(encoding="utf-8").splitlines():
+            for linea in env.read_text(encoding="utf-8-sig").splitlines():
                 linea = linea.strip()
                 if linea.startswith(variable + "="):
                     # La ruta puede traer espacios y no estar entrecomillada.
                     valor = linea.split("=", 1)[1].strip().strip('"').strip("'")
                     break
+    return valor
+
+
+def _carpetas_de(variable: str) -> list[pathlib.Path]:
+    """Las carpetas de una variable, separadas por `;`: del entorno o del .env del repo.
+
+    Una variable PRESENTE pero vacia cuenta como "ninguna carpeta" y no cae al
+    .env: asi los tests se aislan de la configuracion de este PC.
+    """
+    valor = _valor_env(variable)
     return [pathlib.Path(p.strip().strip('"').strip("'"))
             for p in (valor or "").split(";") if p.strip()]
 
@@ -203,15 +214,20 @@ def _matchea(nombre: str, spec: FuenteSpec) -> bool:
     return any(fnmatch.fnmatch(n, _norm(p)) for p in spec.incluye)
 
 
-def es_de_alguna_fuente(nombre: str, excepto: str | None = None) -> bool:
+def es_de_alguna_fuente(
+    nombre: str, excepto: str | None = None, fuentes: dict[str, FuenteSpec] | None = None
+) -> bool:
     """¿El archivo corresponde a alguna fuente declarada (fuera de `excepto`)?
 
     Sirve para identificar los respaldos anuales de venta por descarte: se llaman
     "2025 (4).xlsx" y no hay patrón que los reconozca, pero sí se sabe qué NO son.
     Una lista negra a mano ya falló dos veces (el seguimiento importado leído como
-    nacional, el "BASE NUEVO MIX 2026_1" leído como respaldo de ventas)."""
+    nacional, el "BASE NUEVO MIX 2026_1" leído como respaldo de ventas).
+
+    `fuentes`: las de la configuración de la plataforma cuando está en modo
+    `activa`, incluidas las que solo se reconocen. Por defecto, `FUENTES`."""
     return any(
-        _matchea(nombre, spec) for n, spec in FUENTES.items() if n != excepto
+        _matchea(nombre, spec) for n, spec in (fuentes or FUENTES).items() if n != excepto
     )
 
 
@@ -225,14 +241,11 @@ def archivos_crudos() -> list[pathlib.Path]:
     voltear una corrida que igual puede trabajar con lo que si esta a mano. Lo
     que quede viejo ya lo denuncia el control de frescura.
     """
+    from .config_fuentes import listar
+
     salida: list[pathlib.Path] = []
     for carpeta in CRUDOS_DIRS:
-        if not carpeta.exists():
-            continue
-        salida += [
-            p for p in carpeta.rglob("*")
-            if p.is_file() and p.suffix.lower() in _EXT and not p.name.startswith("~$")
-        ]
+        salida += listar(carpeta, recursiva=True, extensiones=_EXT)
     return salida
 
 
@@ -250,14 +263,11 @@ def archivos_de_stock() -> list[pathlib.Path]:
     Sin recursion por lo mismo: la subcarpeta "Anteriores" guarda versiones viejas.
     Una carpeta que no existe se salta, igual que en `archivos_crudos`.
     """
+    from .config_fuentes import listar
+
     salida: list[pathlib.Path] = []
     for carpeta in STOCK_DIRS:
-        if not carpeta.is_dir():
-            continue
-        salida += [
-            p for p in carpeta.iterdir()
-            if p.is_file() and p.suffix.lower() in _EXT and not p.name.startswith("~$")
-        ]
+        salida += listar(carpeta, recursiva=False, extensiones=_EXT)
     return salida
 
 
@@ -279,17 +289,53 @@ def _candidatos(fuente: str) -> list[pathlib.Path]:
     return sorted(matches, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def mensaje_sin_archivo(fuente: str, carpetas, incluye, excluye) -> str:
+    donde = "\n  ".join(str(c) for c in carpetas)
+    return (
+        f"No se encontró archivo para la fuente '{fuente}'. Se buscó en:\n  {donde}\n"
+        f"Patrones: incluye={incluye} excluye={excluye}.\n"
+        "Descarga el Excel desde SharePoint y déjalo ahí (ver data/crudos/README.md)."
+    )
+
+
+# El manifiesto de la corrida en curso (`config_fuentes.Manifiesto`). Con uno
+# fijado, todos los pasos leen la COPIA que se hizo al partir, y no lo que haya
+# en la carpeta en ese momento: el sugerido leia el stock al partir y las altas
+# de la lista de precios lo volvian a buscar media hora despues, cuando OneDrive
+# ya podia haberlo reemplazado. Se fija de una vez y entero; nada de `FUENTES` ni
+# de las carpetas se modifica.
+_MANIFIESTO = None
+
+
+def fijar_manifiesto(m) -> None:
+    global _MANIFIESTO
+    _MANIFIESTO = m
+
+
+def soltar_manifiesto() -> None:
+    global _MANIFIESTO
+    _MANIFIESTO = None
+
+
+def manifiesto_fijado():
+    return _MANIFIESTO
+
+
 def rutas_de(fuente: str) -> list[pathlib.Path]:
-    """Todos los archivos que matchean la fuente (más reciente primero)."""
+    """Todos los archivos que matchean la fuente (más reciente primero).
+
+    Con un manifiesto fijado devuelve la copia del archivo elegido, y solo esa:
+    lo unico que se lee de esta lista es el primero (`ruta_de`)."""
+    if _MANIFIESTO is not None and _MANIFIESTO.cubre(fuente):
+        rutas = _MANIFIESTO.rutas(fuente)
+        if not rutas:
+            raise FileNotFoundError(_MANIFIESTO.mensaje_sin_archivo(fuente))
+        return list(rutas)
     candidatos = _candidatos(fuente)
     if not candidatos:
         spec = FUENTES[fuente]
-        donde = "\n  ".join(str(c) for c in _carpetas_de_la_fuente(fuente))
-        raise FileNotFoundError(
-            f"No se encontró archivo para la fuente '{fuente}'. Se buscó en:\n  {donde}\n"
-            f"Patrones: incluye={spec.incluye} excluye={spec.excluye}.\n"
-            "Descarga el Excel desde SharePoint y déjalo ahí (ver data/crudos/README.md)."
-        )
+        raise FileNotFoundError(mensaje_sin_archivo(
+            fuente, _carpetas_de_la_fuente(fuente), spec.incluye, spec.excluye))
     return candidatos
 
 
