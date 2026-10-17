@@ -117,6 +117,42 @@ def test_un_archivo_con_el_anio_que_queda_sin_fuente_cae_en_ventas_y_frena(arbol
     assert fin["reporte"]["fuentes"]["ventas"]["hecho"] == "error_lectura"
 
 
+def test_una_fuente_desactivada_no_frena_y_sus_archivos_no_caen_en_ventas(arbol, plataforma, correr):
+    """"Activa" desmarcado en el panel: el motor no la lee, asi que tampoco puede
+    frenar por ella (el panel la muestra gris, "el motor no la lee"). Y sus
+    archivos siguen reconocidos: el mix lleva el ano en el nombre ("BASE NUEVO MIX
+    2026_1.xlsx") y, sin su patron, se probaba como respaldo de venta."""
+    cfg = semilla("activa")
+    for clave in ("seguimiento_frontera", "mix_reemplazos", "vigentes_ford"):
+        fuente_de(cfg, clave)["activa"] = False
+    plataforma.config = cfg
+
+    r = correr()
+
+    fin = plataforma.reportes[-1]
+    assert (r.codigo, fin["resultado"], len(r.enviados)) == (0, "ok", 1)
+    assert r.lecturas["mix_reemplazos"] is None and r.lecturas["seguimiento_frontera"] is None
+    assert [n for n, _ in r.lecturas["ventas"]] == [p.name for p in arbol.ventas]
+    assert fin["reporte"]["fuentes"]["mix_reemplazos"]["hecho"] == "desactivada"
+    assert fin["reporte"]["fuentes"]["ventas"]["hecho"] == "encontrado"
+
+
+def test_en_prueba_una_fuente_desactivada_no_dice_que_frenaria(arbol, plataforma, correr):
+    cfg = semilla("prueba")
+    fuente_de(cfg, "mix_reemplazos")["activa"] = False
+    plataforma.config = cfg
+
+    r = correr()
+
+    fuentes = plataforma.reportes[-1]["reporte"]["fuentes"]
+    assert r.codigo == 0
+    assert fuentes["mix_reemplazos"]["prueba"]["hecho"] == "desactivada"
+    assert fuentes["mix_reemplazos"]["prueba"]["frenaria"] is None
+    # Los respaldos de la plataforma no se confunden con el mix.
+    assert fuentes["ventas"]["prueba"]["resultado"] == "coincide"
+    assert fuentes["ventas"]["prueba"]["frenaria"] is None
+
+
 def test_en_prueba_una_obligatoria_que_falta_no_frena(arbol, plataforma, correr):
     cfg = semilla("prueba")
     fuente_de(cfg, "mix_reemplazos")["incluye"] = ["*no existe*"]
@@ -241,6 +277,42 @@ def test_los_plazos_salen_de_la_configuracion(arbol, plataforma, correr):
     fuente_de(cfg, "lista_erp")["al_vencer"] = "avisa"
     plataforma.config = cfg
     assert correr().codigo == 0
+
+
+def test_el_plazo_de_ventas_se_mide_con_el_respaldo_mas_nuevo(arbol, plataforma, correr):
+    """Ventas trae dos archivos: el respaldo del ano pasado no se vuelve a tocar.
+    El plazo se mide con el mas nuevo, igual que el panel ("Al día"); con el
+    primero en orden de nombre, la corrida frenaba todos los dias."""
+    cfg = semilla("activa")
+    fuente_de(cfg, "ventas")["frecuencia_dias"] = 30
+    plataforma.config = cfg
+    _envejecer(arbol.ventas[0], 200)       # "<ano-1> (4).xlsx"
+
+    r = correr()
+
+    fin = plataforma.reportes[-1]
+    assert (r.codigo, fin["resultado"]) == (0, "ok")
+    assert fin["reporte"]["fuentes"]["ventas"]["edad_dias_habiles"] == 0
+
+    # Si el mas nuevo tambien se atrasa, frena y nombra ese.
+    _envejecer(arbol.ventas[1], 70)        # 10 semanas: 50 dias habiles
+    r = correr()
+    assert r.codigo == 1
+    assert (f"{arbol.ventas[1].name}: 50 dias habiles (se espera al dia cada 30)"
+            in plataforma.reportes[-1]["motivo"])
+
+
+def test_en_prueba_el_plazo_de_ventas_tambien_mira_el_mas_nuevo(arbol, plataforma, correr):
+    cfg = semilla("prueba")
+    fuente_de(cfg, "ventas")["frecuencia_dias"] = 30
+    plataforma.config = cfg
+    _envejecer(arbol.ventas[0], 200)
+
+    correr()
+
+    ventas = plataforma.reportes[-1]["reporte"]["fuentes"]["ventas"]
+    assert ventas["prueba"]["frenaria"] is None
+    assert ventas["edad_dias_habiles"] == 0
 
 
 def test_la_fecha_de_la_semana_pasada_da_5_dias_habiles():

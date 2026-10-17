@@ -73,6 +73,31 @@ las dos carpetas y elige **"Mantener siempre en este dispositivo"**. Si un archi
 está solo en la nube, el motor lo baja al copiarlo, y si OneDrive no termina en 10
 minutos la fuente queda como "Bajando de OneDrive".
 
+## Cambio de PC titular
+
+Solo el PC titular publica. Se elige en Fuentes de datos. El mismo día, en el PC que
+deja de ser titular, deshabilita sus tareas en el Programador de tareas de Windows
+(clic derecho, **Deshabilitar**):
+
+- `Sugerido Curifor - Motor diario`
+- `Sugerido Curifor - Vigentes FORD semanal`
+- `Sugerido Curifor - Agente`, si está: la deja `scripts/instalar_agente.ps1` y
+  atiende el botón "Actualizar ahora".
+
+O, en PowerShell como administrador:
+
+```powershell
+Disable-ScheduledTask -TaskName "Sugerido Curifor - Motor diario"
+Disable-ScheduledTask -TaskName "Sugerido Curifor - Vigentes FORD semanal"
+Disable-ScheduledTask -TaskName "Sugerido Curifor - Agente"   # si existe
+```
+
+La guarda de titular igual impide que ese PC publique, pero sus tareas siguen
+corriendo. Si los dos PCs tienen el agente, compiten por cada clic del botón: si
+gana el que ya no es titular, no publica nada y la web dice "No se publicó nada: la
+solicitud la tomó un PC que ya no es el titular". La tarea de vigentes Ford lo
+anota en su log.
+
 ## Comandos
 
 Desde `apps/api`:
@@ -91,8 +116,10 @@ Desde `apps/api`:
 
 Variables del `.env` del PC para emergencias:
 
-- `MOTOR_FUENTES=env`: el motor ignora la plataforma por completo (también el PC
-  titular) y elige con el `.env`. Rige desde la corrida siguiente, sin deploy.
+- `MOTOR_FUENTES=env`: el motor no le pide la configuración a la plataforma (tampoco
+  mira el PC titular) y elige con el `.env`. El reporte al panel se sigue mandando,
+  así se ve que corrió con la configuración del PC. Rige desde la corrida siguiente,
+  sin deploy.
 - `MOTOR_CARPETA_<CLAVE>=<ruta>`: usa esa ruta para la carpeta `<clave>` del panel
   (por ejemplo `MOTOR_CARPETA_BASES_DE_DATOS`). Es la única forma de usar una
   carpeta que no esté dentro de OneDrive.

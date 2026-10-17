@@ -88,6 +88,27 @@ def test_el_env_con_bom_se_lee_desde_la_primera_linea(tmp_path, monkeypatch):
     assert job._leer_env() == {"PLATAFORMA_API_URL": "http://plataforma.test"}
 
 
+@pytest.mark.parametrize("linea", ["MOTOR_FUENTES=env", "MOTOR_FUENTES = env",
+                                   "MOTOR_FUENTES= env", "MOTOR_FUENTES =env"])
+def test_el_kill_switch_se_lee_aunque_lleve_espacios(tmp_path, monkeypatch, linea):
+    """En una emergencia alguien lo escribe a mano. Con espacios antes del '=' la
+    tarea de las 09:30 no lo veia y seguia obedeciendo a la plataforma, mientras el
+    agente (que lee el .env con '\\s*=\\s*') si lo veia."""
+    monkeypatch.delenv("MOTOR_FUENTES", raising=False)
+    (tmp_path / ".env").write_text("# motor\n" + linea + "\n", encoding="utf-8")
+    monkeypatch.setattr(fuentes, "_REPO_DIR", tmp_path)
+
+    assert cf._kill_switch() is True
+
+
+def test_una_variable_que_empieza_igual_no_se_confunde(tmp_path, monkeypatch):
+    monkeypatch.delenv("MOTOR_FUENTES", raising=False)
+    (tmp_path / ".env").write_text("MOTOR_FUENTES_VIEJO=env\n", encoding="utf-8")
+    monkeypatch.setattr(fuentes, "_REPO_DIR", tmp_path)
+
+    assert fuentes._valor_env("MOTOR_FUENTES") is None
+
+
 # --- cascada ----------------------------------------------------------------------
 
 
@@ -182,7 +203,8 @@ def test_un_error_de_archivo_no_activa_la_cascada(arbol, plataforma, monkeypatch
 
     assert (m.origen, m.resolucion) == ("plataforma", "plataforma")
     assert m.por_clave["stock_bodegas"].hecho == "error_lectura"
-    assert "Acceso denegado" in m.por_clave["stock_bodegas"].mensaje
+    assert "abierto o bloqueado" in m.por_clave["stock_bodegas"].mensaje
+    assert "Acceso denegado" in m.por_clave["stock_bodegas"].detalle
     assert m.por_clave["stock_bodegas_frontera"].hecho == "encontrado"
 
 
@@ -202,9 +224,69 @@ def test_una_copia_sin_permiso_tampoco(arbol, plataforma, monkeypatch):
 
     f = m.por_clave["stock_bodegas_frontera"]
     assert m.origen == "plataforma"
-    assert f.hecho == "error_lectura" and "en uso" in f.mensaje
+    assert f.hecho == "error_lectura" and "en uso" in f.detalle
+    assert f.mensaje == ("No se pudo copiar stock_frontera.xlsx: está abierto o bloqueado por "
+                         "otro programa.")
     # Se sigue leyendo el original, como hoy: la lectura dira si de verdad no se puede.
     assert f.copias == (arbol.archivos["stock_bodegas_frontera"],)
+
+
+def _bloquear(ruta):
+    """Abre `ruta` sin compartirla, como el programa del ERP mientras escribe: nadie
+    mas la puede leer hasta que se cierre. Devuelve con que cerrarla."""
+    import ctypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = ctypes.c_void_p
+    h = k32.CreateFileW(str(ruta), 0x80000000, 0, None, 3, 0x80, None)  # GENERIC_READ, sin compartir
+    assert h not in (None, ctypes.c_void_p(-1).value)
+    return lambda: k32.CloseHandle(ctypes.c_void_p(h))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="el bloqueo de archivos es de Windows")
+def test_un_archivo_bloqueado_no_lleva_la_ruta_al_panel(arbol, plataforma):
+    """`--probar` (lo que corre a diario el PC de la jefa) con el stock tomado por el
+    programa del ERP. El mensaje va al texto rojo del panel y a la campanita: dice
+    el archivo y la causa, sin la ruta con el usuario de Windows. El error crudo
+    queda en `detalle`."""
+    plataforma.config = {"modo": "sin_configurar"}
+    stock = arbol.archivos["stock_bodegas"]
+    soltar = _bloquear(stock)
+    try:
+        corrida = cf.nueva_corrida(oficial=False, tipo="probar")
+        cf.preparar_fuentes(corrida, copiar=False, guardar_cache=False, reportar=False)
+        estado = cf.payload_de_reporte(corrida, "fin")["reporte"]["fuentes"]["stock_bodegas"]
+    finally:
+        soltar()
+
+    assert estado["hecho"] == "error_lectura"
+    assert estado["mensaje"] == ("No se pudo leer STOCK_BODEGAS_CURIFOR.xlsx: está abierto o "
+                                 "bloqueado por otro programa.")
+    assert str(arbol.od) not in estado["mensaje"]
+    assert "PermissionError" in estado["detalle"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="el bloqueo de archivos es de Windows")
+def test_un_respaldo_de_venta_bloqueado_no_lleva_la_ruta_al_motivo(arbol, plataforma, correr):
+    plataforma.config = {"modo": "sin_configurar"}
+    soltar = _bloquear(arbol.ventas[1])
+    try:
+        r = correr()
+    finally:
+        soltar()
+
+    fin = plataforma.reportes[-1]
+    ventas = fin["reporte"]["fuentes"]["ventas"]
+    assert r.codigo == 1 and r.enviados == []
+    assert ventas["hecho"] == "error_lectura"
+    assert ventas["mensaje"] == (f"No se pudo abrir '{arbol.ventas[1].name}' para ver si es un "
+                                 "respaldo de venta: está abierto o bloqueado por otro programa.")
+    assert "PermissionError" in ventas["detalle"]
+    # Ni el motivo de la corrida ni la incidencia (la campanita) llevan la ruta.
+    (motivo, detalle), = r.incidencias
+    for texto in (fin["motivo"], motivo, detalle):
+        assert str(arbol.od) not in texto
+    assert "está abierto o bloqueado por otro programa" in fin["motivo"]
 
 
 # --- GET /config y POST /reporte ---------------------------------------------------
@@ -343,6 +425,27 @@ def test_el_env_del_pc_manda_aunque_sea_una_ruta_local(arbol, tmp_path, monkeypa
     assert (r.ruta, r.metodo) == (local, "env")
 
 
+def test_la_ruta_portable_fuera_de_onedrive_no_lleva_el_usuario_de_windows(arbol, tmp_path, monkeypatch):
+    """La salida de emergencia (MOTOR_CARPETA_<CLAVE>) puede apuntar fuera de
+    OneDrive. La vista principal del panel muestra `ruta_portable`; la ruta con el
+    usuario de Windows va solo en `ruta_absoluta`, que se ve en el detalle."""
+    perfil = tmp_path / "Users" / "jefa"
+    local = perfil / "Escritorio local" / "tablas ERP"
+    local.mkdir(parents=True)
+    otra = tmp_path / "D" / "datos"
+    otra.mkdir(parents=True)
+    monkeypatch.setenv("USERPROFILE", str(perfil))
+    monkeypatch.setenv("MOTOR_CARPETA_DATABI_DATOS", str(local))
+
+    r = cf.resolver_carpeta(_carpeta())
+    listado = cf._listado(r.clave, r.nombre, r.ruta, r.metodo, r.probadas, [], {}, ["PC-MOTOR"],
+                          "configuracion")
+
+    assert listado["ruta_portable"] == "%USERPROFILE%\\Escritorio local\\tablas ERP"
+    assert listado["ruta_absoluta"] == str(local)
+    assert cf.ruta_portable(otra) is None
+
+
 def test_la_ruta_por_pc_fuera_de_onedrive_se_ignora_y_se_avisa(arbol, tmp_path):
     afuera = tmp_path / "C" / "datos"
     afuera.mkdir(parents=True)
@@ -355,6 +458,54 @@ def test_la_ruta_por_pc_fuera_de_onedrive_se_ignora_y_se_avisa(arbol, tmp_path):
     assert (ignorada.ruta, ignorada.metodo) == (arbol.databi, "atajo")
     assert ignorada.avisos and "fuera de OneDrive" in ignorada.avisos[0]
     assert (usada.ruta, usada.metodo) == (dentro, "ruta_por_pc")
+
+
+@pytest.mark.parametrize("sufijo", ["", os.sep, os.sep + "."])
+def test_la_ruta_por_pc_no_puede_ser_la_raiz_de_onedrive(arbol, sufijo):
+    """§3.2: no se busca en todo OneDrive. Con la raiz como ruta de un PC, la
+    ubicacion recursiva de Bases de datos recorria el OneDrive entero y el listado
+    subia al panel nombres de archivos personales."""
+    r = cf.resolver_carpeta(_carpeta(rutas_por_pc={"PC-MOTOR": str(arbol.od) + sufijo}), "PC-MOTOR")
+
+    assert (r.ruta, r.metodo) == (arbol.databi, "atajo")
+    assert r.avisos and "raíz de OneDrive" in r.avisos[0]
+
+
+def test_la_ruta_por_pc_tampoco_puede_ser_la_carpeta_de_la_organizacion(arbol, tmp_path, monkeypatch):
+    """%USERPROFILE%\\<Org>, donde deja las bibliotecas el boton "Sincronizar":
+    su raiz es igual de amplia. Una carpeta de adentro si vale."""
+    org = tmp_path / "perfil" / "Org"           # OneDrive de mentira: "OneDrive - Org"
+    (org / "Biblioteca").mkdir(parents=True)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "perfil"))
+
+    raiz = cf.resolver_carpeta(_carpeta(rutas_por_pc={"PC-MOTOR": str(org)}), "PC-MOTOR")
+    adentro = cf.resolver_carpeta(_carpeta(rutas_por_pc={"PC-MOTOR": str(org / "Biblioteca")}),
+                                  "PC-MOTOR")
+
+    assert raiz.metodo == "atajo" and raiz.avisos
+    assert (adentro.ruta, adentro.metodo) == (org / "Biblioteca", "ruta_por_pc")
+
+
+def test_el_listado_no_entra_mas_abajo_de_3_niveles(tmp_path, monkeypatch):
+    """El tope de 3 niveles se aplicaba despues de recorrer todo con `rglob`."""
+    import pathlib
+
+    raiz = tmp_path / "carpeta"
+    (raiz / "a" / "b" / "c").mkdir(parents=True)
+    (raiz / "a" / "b" / "c" / "Stock bodegas.xlsx").write_bytes(b"x")
+    hondo = raiz / "a" / "b" / "c" / "d" / "e"
+    hondo.mkdir(parents=True)
+    (hondo / "lejos.xlsx").write_bytes(b"x")
+    mirados = []
+    for metodo in ("is_file", "stat"):
+        real = getattr(pathlib.Path, metodo)
+        monkeypatch.setattr(pathlib.Path, metodo,
+                            lambda self, *a, _r=real, **k: mirados.append(self.name) or _r(self, *a, **k))
+
+    listado = cf._listado("x", "X", raiz, "onedrive", (), [], {}, ["PC-MOTOR"], "configuracion")
+
+    assert [a["ruta_relativa"] for a in listado["archivos"]] == ["a/b/c/Stock bodegas.xlsx"]
+    assert "lejos.xlsx" not in mirados
 
 
 def test_winreg_no_se_usa():
@@ -602,6 +753,85 @@ def test_en_prueba_se_reporta_coincide_difiere_y_difiere_esperado(arbol, platafo
     assert len(r.enviados) == 1
 
 
+def _ensayo_del_stock_en_sharepoint(arbol, plataforma, contenido=b"stock_sharepoint"):
+    """Prueba con el stock apuntado a Data BI (el ensayo de la tanda 1). Por defecto
+    el archivo de SharePoint es del mismo tamano que el local: para saber si son el
+    mismo hay que leer los dos originales. El .env sigue eligiendo el local, que es
+    mas nuevo."""
+    arbol.stock_sp.write_bytes(contenido)
+    viejo = time.time() - 3600
+    os.utime(arbol.stock_sp, (viejo, viejo))
+    cfg = semilla("prueba")
+    stock = fuente_de(cfg, "stock_bodegas")
+    stock["ubicaciones"] = [{"carpeta": "databi_datos", "subcarpeta": "", "recursiva": False}]
+    stock["diferencia_esperada"] = True
+    plataforma.config = cfg
+
+
+def test_comparar_un_original_que_no_termina_de_leerse_tiene_tope(arbol, plataforma, correr, monkeypatch):
+    """En prueba, ver si los dos lados eligieron el mismo contenido lee los
+    ORIGINALES. Si el de SharePoint esta solo en la nube y OneDrive se pega, esa
+    lectura no puede colgar la corrida: va con el mismo tope que la copia y, si se
+    acaba, da "difiere"."""
+    import threading
+
+    _ensayo_del_stock_en_sharepoint(arbol, plataforma)
+    assert arbol.stock_sp.stat().st_size == arbol.archivos["stock_bodegas"].stat().st_size
+    monkeypatch.setattr(cf, "TOPE_COPIA_ARCHIVO_SEG", 0.2)
+    soltar = threading.Event()
+    real = cf.sha256
+
+    def sha(p):
+        if str(p) == str(arbol.stock_sp):
+            soltar.wait(10)            # OneDrive pegado
+        return real(p)
+
+    monkeypatch.setattr(cf, "sha256", sha)
+    inicio = time.time()
+    try:
+        r = correr()
+    finally:
+        soltar.set()
+
+    assert time.time() - inicio < 5
+    assert r.codigo == 0 and len(r.enviados) == 1
+    prueba = plataforma.reportes[-1]["reporte"]["fuentes"]["stock_bodegas"]["prueba"]
+    assert prueba["resultado"] == "difiere_esperado"
+
+
+def test_comparar_dos_archivos_de_distinto_tamano_no_los_lee(arbol, plataforma, correr, monkeypatch):
+    _ensayo_del_stock_en_sharepoint(arbol, plataforma, b"stock de sharepoint, otro tamano")
+    leidos = []
+    real = cf.sha256
+    monkeypatch.setattr(cf, "sha256", lambda p: leidos.append(str(p)) or real(p))
+
+    correr()
+
+    assert str(arbol.stock_sp) not in leidos
+    prueba = plataforma.reportes[-1]["reporte"]["fuentes"]["stock_bodegas"]["prueba"]
+    assert prueba["resultado"] == "difiere_esperado"
+
+
+def test_probar_no_baja_de_la_nube_lo_que_solo_compara(arbol, plataforma, monkeypatch):
+    """`--probar` (el PC de la jefa, todos los dias) y la oficial de un PC que no es
+    el titular no copian nada: leer un archivo solo en la nube para sacarle la
+    huella lo bajaria entero (la LISTA DE PRECIOS pesa 104 MB)."""
+    _ensayo_del_stock_en_sharepoint(arbol, plataforma)
+    en_la_nube = {str(arbol.stock_sp), str(arbol.archivos["catalogo"])}
+    real_estado = cf.estado_onedrive
+    monkeypatch.setattr(cf, "estado_onedrive",
+                        lambda p: "solo_nube" if str(p) in en_la_nube else real_estado(p))
+    leidos = []
+    real = cf.sha256
+    monkeypatch.setattr(cf, "sha256", lambda p: leidos.append(str(p)) or real(p))
+
+    assert cf.main(["--probar"]) == 0
+
+    assert not en_la_nube & set(leidos)
+    # Lo que si esta en el PC se sigue midiendo.
+    assert str(arbol.archivos["stock_bodegas_frontera"]) in leidos
+
+
 # --- PC titular ----------------------------------------------------------------------
 
 
@@ -631,6 +861,9 @@ def test_el_kill_switch_ignora_tambien_el_titular(arbol, plataforma, correr, mon
 
     assert r.codigo == 0 and len(r.enviados) == 1
     assert plataforma.pedidas == 0
+    # No pide la configuracion, pero el reporte si va: el panel muestra que corrio
+    # con la configuracion del PC (docs/adr/0004, data/crudos/README.md).
+    assert plataforma.reportes[-1]["config_origen"] == "env"
 
 
 # --- reporte ---------------------------------------------------------------------------
@@ -688,6 +921,38 @@ def test_el_listado_marca_un_archivo_compartido_con_la_fuente_que_lo_lee(arbol, 
     ford = next(a for a in carpetas["bases_de_datos"]["archivos"]
                 if a["ruta_relativa"] == "Lista de precios/Lista de precio ford.xlsx")
     assert (ford["fuente"], ford["elegido"]) == ("precios_ford", True)
+
+
+@pytest.mark.parametrize("caso", ["ruta_editada", "sin_onedrive"])
+def test_el_listado_no_repite_la_clave_de_una_carpeta_configurada(arbol, plataforma, monkeypatch, caso):
+    """En prueba el .env sigue leyendo su carpeta, y si la configurada se resuelve
+    a otra ruta (un ensayo que la mueve, o un PC sin %OneDriveCommercial%) su
+    listado salia con la MISMA clave. La plataforma arma un dict por clave y se
+    quedaba con el del .env: los selectores y la vista previa mostraban la carpeta
+    vieja mientras la fila del stock decia que este PC no la tenia."""
+    cfg = semilla("prueba")
+    if caso == "ruta_editada":
+        nueva = arbol.od / "Documentos" / "Motor"
+        (nueva / "stock").mkdir(parents=True)
+        (nueva / "stock" / "Stock bodegas nuevo.xlsx").write_bytes(b"x")
+        next(c for c in cfg["carpetas"] if c["clave"] == "bases_de_datos")["params"]["ruta"] = (
+            "Documentos/Motor")
+    plataforma.config = cfg
+    if caso == "sin_onedrive":
+        monkeypatch.delenv("OneDriveCommercial")
+    corrida = cf.nueva_corrida(oficial=False, tipo="probar")
+
+    cf.preparar_fuentes(corrida, copiar=False, guardar_cache=False, reportar=False)
+
+    carpetas = cf.payload_de_reporte(corrida, "fin")["reporte"]["carpetas"]
+    claves = [c["clave"] for c in carpetas]
+    assert len(claves) == len(set(claves))
+    bd = next(c for c in carpetas if c["clave"] == "bases_de_datos")
+    assert bd["origen"] == "configuracion"
+    if caso == "ruta_editada":
+        assert [a["ruta_relativa"] for a in bd["archivos"]] == ["stock/Stock bodegas nuevo.xlsx"]
+    else:
+        assert bd["existe"] is False
 
 
 def test_si_el_reporte_falla_la_corrida_no_cambia_y_queda_pendiente(arbol, plataforma, correr):

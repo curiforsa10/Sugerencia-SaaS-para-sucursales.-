@@ -1737,6 +1737,12 @@ def revisar_frescura(hoy: date | None = None) -> list[str]:
             ruta = fuentes.ruta_de(fuente)
         except FileNotFoundError:
             continue
+        # Una fuente con varios archivos (ventas: el respaldo del ano y el del
+        # anterior, que ya no se toca) se mide con el mas nuevo, igual que el panel.
+        # `ruta_de` da el primero por nombre, y con el se frenaba todos los dias.
+        m = fuentes.manifiesto_fijado()
+        if m is not None and m.cubre(fuente) and len(m.rutas(fuente)) > 1:
+            ruta = max(m.rutas(fuente), key=lambda p: p.stat().st_mtime)
         edad = dias_habiles(date.fromtimestamp(ruta.stat().st_mtime), hoy)
         if edad > dias:
             aviso = f"{ruta.name}: {edad} dias habiles (se espera al dia cada {dias})"

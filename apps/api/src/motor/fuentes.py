@@ -37,6 +37,10 @@ def _valor_env(variable: str) -> str | None:
     `utf-8-sig` y no `utf-8`: el .env de este PC parte con BOM, y con `utf-8` la
     primera linea llega como "\\ufeffVARIABLE=..." y no calza con nada. Hoy no
     falla solo porque la primera variable esta en la linea 4.
+
+    La clave se compara sin espacios, igual que `correr_motor_real._leer_env`: un
+    "MOTOR_FUENTES = env" escrito a mano en una emergencia no se leia, y la tarea
+    de las 09:30 seguia obedeciendo a la plataforma.
     """
     valor = os.environ.get(variable)
     if valor is None:
@@ -44,7 +48,7 @@ def _valor_env(variable: str) -> str | None:
         if env.exists():
             for linea in env.read_text(encoding="utf-8-sig").splitlines():
                 linea = linea.strip()
-                if linea.startswith(variable + "="):
+                if "=" in linea and linea.split("=", 1)[0].strip() == variable:
                     # La ruta puede traer espacios y no estar entrecomillada.
                     valor = linea.split("=", 1)[1].strip().strip('"').strip("'")
                     break

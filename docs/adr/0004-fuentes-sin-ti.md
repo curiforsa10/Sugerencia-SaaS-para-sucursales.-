@@ -36,7 +36,9 @@ Hasta ahora sabía qué archivo leer por dos variables del `.env` de ese PC
    contra él. El multiempresa no se construye ahora.
 5. **El motor nunca deja de correr por culpa de esto.** La configuración se pide al
    partir, con una cascada:
-   - `MOTOR_FUENTES=env` en el `.env` del PC: se usa el `.env` y no se consulta nada.
+   - `MOTOR_FUENTES=env` en el `.env` del PC: se usa el `.env` y no se le pide la
+     configuración a la plataforma (tampoco se mira el PC titular). El reporte al
+     panel se sigue mandando, así el panel muestra que corrió con la del PC.
    - La plataforma responde: se usa y se guarda en `apps/api/data/fuentes_config_cache.json`.
    - No responde o manda algo inválido: se usa la guardada, por vieja que sea.
    - No hay guardada: se usa el `.env`, como siempre.

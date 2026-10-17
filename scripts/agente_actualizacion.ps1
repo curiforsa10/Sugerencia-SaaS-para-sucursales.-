@@ -30,6 +30,9 @@ function Escribir($texto) {
     if ($Verboso) { Write-Host $linea }
 }
 
+# Que dijo el motor: si publico, cuantas filas, o si este PC no es el titular.
+. "$PSScriptRoot\salida_motor.ps1"
+
 # --- Configuracion: se lee del .env (lo deja instalar_agente.ps1) ---
 $envFile = "$root\.env"
 if (Test-Path $envFile) {
@@ -106,12 +109,20 @@ try {
 
     Add-Content -Path $log -Value $salida -Encoding utf8
 
-    if ($codigo -eq 0) {
+    $titular = if ($codigo -eq 0) { Titular-SiNoPublico $salida } else { $null }
+    if ($titular) {
+        # Este PC ya no es el titular de Fuentes de datos: el motor sale con 0 a
+        # proposito (no es una falla), pero no calculo ni publico. La tarjeta no
+        # puede quedar en OK. Pasa si el PC que dejo de ser titular conserva la
+        # tarea del agente: los dos compiten por cada clic (ver data/crudos/README.md).
+        $mensaje = "No se publicó nada: la solicitud la tomó un PC que ya no es el titular " +
+                   "(el titular es $titular). Vuelve a apretar el botón; si se repite, avísale a un admin."
+    }
+    elseif ($codigo -eq 0) {
         $ok = $true
         # El mensaje va tal cual a la tarjeta de la web, asi que se arma en lenguaje
         # de usuario a partir de lo que el motor imprimio.
-        $filas = ($salida | Select-String -Pattern 'CARGA OFICIAL:\s*([\d\.]+)\s*filas' |
-                  Select-Object -First 1).Matches.Groups[1].Value
+        $filas = Filas-Publicadas $salida
         if ($filas) { $mensaje = "Se publicaron $filas filas." }
         else { $mensaje = "El motor terminó correctamente." }
     }

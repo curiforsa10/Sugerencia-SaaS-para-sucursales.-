@@ -20,7 +20,9 @@ Regla de oro: el motor NUNCA deja de correr por culpa de este modulo.
   guardada en este PC (`data/fuentes_config_cache.json`, no vence) y, si no hay,
   el .env. Solo los errores al TRAER la configuracion activan esa cascada: un
   archivo que no se puede copiar o leer queda como estado de su fuente.
-- `MOTOR_FUENTES=env` en el .env apaga todo esto de inmediato.
+- `MOTOR_FUENTES=env` en el .env apaga todo esto de inmediato: se elige con el
+  .env y no se pide la configuracion (ni se mira el PC titular). El reporte al
+  panel se sigue mandando, para que se vea que corrio con la del PC.
 - Se atrapa `Exception` y nunca `BaseException`: `LlamadaRealDesdeUnTest` tiene
   que atravesar la cascada (ver `correr_motor_real._token`).
 
@@ -110,6 +112,40 @@ _dormir = time.sleep
 _reloj = time.time
 
 MOTIVO_NO_ES_VENTA = "no tiene forma de respaldo de venta (le faltan columnas)"
+
+
+class ArchivoIlegible(RuntimeError):
+    """Un archivo que ni siquiera abre. El texto ya va en palabras del panel: el
+    nombre del archivo y la causa, sin la ruta (ver `_causa`)."""
+
+
+def _causa(e: BaseException) -> str:
+    """Por que no se pudo leer un archivo, sin la ruta y sin jerga. El texto de la
+    excepcion trae la ruta completa, con el usuario de Windows ("[Errno 13]
+    Permission denied: 'C:\\Users\\...'"), y el mensaje de la fuente va al texto
+    rojo del panel y a la campanita. El texto crudo queda en `detalle`."""
+    if isinstance(e, PermissionError):
+        return "está abierto o bloqueado por otro programa"
+    if isinstance(e, FileNotFoundError):
+        return "ya no está en la carpeta (se movió o se borró mientras corría el motor)"
+    if isinstance(e, OSError):
+        return "Windows no dejó leerlo (revisa que OneDrive esté sincronizado)"
+    return "no se pudo abrir como planilla (puede estar a medio bajar o dañado)"
+
+
+def _detalle(e: BaseException) -> str:
+    """El error crudo, para el log y el detalle de la fuente. Trae la ruta."""
+    texto = f"{type(e).__name__}: {e}"
+    if e.__cause__ is not None:
+        texto += f" ({type(e.__cause__).__name__}: {e.__cause__})"
+    return texto
+
+
+def _mensaje_de(e: BaseException) -> str:
+    if isinstance(e, ArchivoIlegible):
+        return str(e)
+    return f"No se pudieron revisar los archivos de la carpeta: {_causa(e)}."
+
 
 # --------------------------------------------------------------------- catalogo
 # Lo que el motor declara de cada fuente. La plataforma valida contra esto y no
@@ -328,7 +364,8 @@ class Eleccion:
     clave: str
     nombre: str
     uso: str
-    hecho: str          # encontrado | falta | carpeta_no_encontrada | error_lectura
+    # encontrado | falta | carpeta_no_encontrada | error_lectura | desactivada
+    hecho: str
     elegidos: tuple[Archivo, ...] = ()
     candidatos: tuple[Archivo, ...] = ()
     descartados: tuple[tuple[str, str], ...] = ()
@@ -340,7 +377,8 @@ class Eleccion:
     al_vencer: str = "frena"
     obligatoria: bool = False
     diferencia_esperada: bool = False
-    mensaje: str | None = None
+    mensaje: str | None = None      # para el panel: sin la ruta (ver `_causa`)
+    detalle: str | None = None      # el error crudo, para el log y el detalle
 
 
 @dataclass(frozen=True)
@@ -352,6 +390,7 @@ class FuenteElegida:
     sha256: tuple[str | None, ...] = ()
     onedrive: tuple[str | None, ...] = ()
     mensaje: str | None = None
+    detalle: str | None = None
     abierto_en_excel: bool = False
     mismo_contenido_que_anterior: bool = False
     prueba: dict | None = None
@@ -568,21 +607,37 @@ def _carpeta_org() -> pathlib.Path | None:
     return pathlib.Path(perfil) / od.name[len("OneDrive - "):]
 
 
+def _raices_onedrive() -> tuple[pathlib.Path, ...]:
+    return tuple(r for r in (_onedrive(), _carpeta_org()) if r is not None)
+
+
 def _dentro_de_onedrive(p) -> bool:
-    return any(r is not None and _dentro_de(p, r) for r in (_onedrive(), _carpeta_org()))
+    """Si `p` queda DENTRO de OneDrive o de %USERPROFILE%\\<Org>, sin ser la raiz:
+    §3.2 no permite buscar en todo OneDrive. Con la raiz, la ubicacion recursiva
+    de Bases de datos recorria el OneDrive entero de la persona."""
+    return any(_dentro_de(p, r) and _clave_ruta(p) != _clave_ruta(r) for r in _raices_onedrive())
+
+
+def _es_raiz_de_onedrive(p) -> bool:
+    return any(_clave_ruta(p) == _clave_ruta(r) for r in _raices_onedrive())
 
 
 def ruta_portable(p: pathlib.Path | None) -> str | None:
-    """La ruta sin el usuario de Windows: %OneDriveCommercial%\\... cuando se puede."""
+    """La ruta sin el usuario de Windows: %OneDriveCommercial%\\... cuando se puede,
+    o %USERPROFILE%\\... para una carpeta local del perfil (la salida de emergencia
+    MOTOR_CARPETA_<CLAVE>). Fuera de eso, None: la vista principal del panel muestra
+    esta ruta, y la absoluta va solo en `ruta_absoluta`, que se ve en el detalle."""
     if p is None:
         return None
     org = _carpeta_org()
+    perfil = os.environ.get("USERPROFILE")
     for raiz, prefijo in ((_onedrive(), "%OneDriveCommercial%"),
-                          (org, f"%USERPROFILE%\\{org.name}" if org else None)):
+                          (org, f"%USERPROFILE%\\{org.name}" if org else None),
+                          (pathlib.Path(perfil) if perfil else None, "%USERPROFILE%")):
         if raiz is not None and _dentro_de(p, raiz):
             resto = os.path.relpath(p, raiz)
             return prefijo if resto == "." else f"{prefijo}\\{resto}"
-    return str(p)
+    return None
 
 
 def sha256(p) -> str:
@@ -649,8 +704,19 @@ def _es_copia_en_conflicto(nombre: str, hostnames) -> str | None:
 
 
 # --------------------------------------------------------------------- listar
+def _hasta(raiz: pathlib.Path, niveles: int):
+    """Lo que hay en `raiz` y hasta `niveles` subcarpetas mas abajo, SIN entrar mas
+    hondo (filtrar despues de `rglob` igual recorria todo)."""
+    for actual, dirs, archivos in os.walk(raiz):
+        if len(pathlib.Path(actual).relative_to(raiz).parts) >= niveles:
+            dirs[:] = []
+        for n in archivos:
+            yield pathlib.Path(actual) / n
+
+
 def listar(raiz, *, recursiva: bool = True, extensiones=EXTENSIONES,
-           avisos: list[str] | None = None, hostnames=None) -> list[pathlib.Path]:
+           avisos: list[str] | None = None, hostnames=None,
+           niveles: int | None = None) -> list[pathlib.Path]:
     """Los archivos de una carpeta que pueden ser una fuente. La UNICA funcion que
     recorre carpetas: la usan la resolucion con el .env, la de la plataforma y el
     listado que va al panel.
@@ -665,6 +731,8 @@ def listar(raiz, *, recursiva: bool = True, extensiones=EXTENSIONES,
 
     Respeta el orden en que las entrega el sistema: el desempate por fecha de
     `fuentes._candidatos` es estable y no puede cambiar de ganador por esto.
+
+    `niveles`: hasta cuantas subcarpetas baja (el listado del panel). Sin el, todas.
     """
     raiz = pathlib.Path(raiz)
     if not raiz.is_dir():
@@ -672,7 +740,13 @@ def listar(raiz, *, recursiva: bool = True, extensiones=EXTENSIONES,
     exts = tuple(e.lower() for e in extensiones)
     hosts = list(hostnames) if hostnames is not None else [_hostname()]
     salida: list[pathlib.Path] = []
-    for p in (raiz.rglob("*") if recursiva else raiz.iterdir()):
+    if not recursiva:
+        recorrido = raiz.iterdir()
+    elif niveles is not None:
+        recorrido = _hasta(raiz, niveles)
+    else:
+        recorrido = raiz.rglob("*")
+    for p in recorrido:
         nombre = p.name
         if nombre.startswith("~$") or nombre.lower() in _IGNORADOS:
             continue
@@ -717,9 +791,10 @@ def seleccion_de_ventas(raices, fin_mes_cerrado: dt.date, *, extensiones=(".xlsx
                 ventas.append(p)
         except Exception as e:  # noqa: BLE001 - se relanza, con el nombre del archivo
             # Un archivo que ni siquiera abre (a medio bajar, o que no es un Excel)
-            # tumba la corrida igual que antes, pero el error dice cual es.
-            raise RuntimeError(f"No se pudo abrir '{p.name}' para ver si es un respaldo de "
-                               f"venta: {type(e).__name__}: {e}") from e
+            # tumba la corrida igual que antes, pero el error dice cual es. Sin la
+            # ruta: este texto llega al panel y a la campanita.
+            raise ArchivoIlegible(f"No se pudo abrir '{p.name}' para ver si es un respaldo de "
+                                  f"venta: {_causa(e)}.") from e
     return ventas, [p for p in candidatos if p not in ventas]
 
 
@@ -750,6 +825,10 @@ def resolver_carpeta(c: Carpeta, hostname: str | None = None) -> CarpetaResuelta
             probadas.append(str(p))
             if p.is_dir():
                 return CarpetaResuelta(c.clave, c.nombre, p, "ruta_por_pc", tuple(probadas))
+        elif _es_raiz_de_onedrive(p):
+            avisos.append(f"La ruta de este PC para '{c.nombre}' es la raíz de OneDrive y se "
+                          "ignora: el motor no busca en todo OneDrive. Elige la carpeta de "
+                          "adentro donde están los archivos.")
         else:
             avisos.append(f"La ruta de este PC para '{c.nombre}' queda fuera de OneDrive y se "
                           f"ignora. Una ruta local se configura solo en el .env ({variable}).")
@@ -1056,8 +1135,8 @@ def cargar_configuracion(*, guardar_cache: bool = True):
     """
     avisos: list[str] = []
     if _kill_switch():
-        return None, "env", ["MOTOR_FUENTES=env en este PC: se usa el .env y no se consulta "
-                             "la plataforma."], None
+        return None, "env", ["MOTOR_FUENTES=env en este PC: se usa el .env y no se le pide "
+                             "la configuración a la plataforma."], None
     cfg, crudo = None, None
     try:
         crudo = obtener_config_fuentes()
@@ -1182,8 +1261,8 @@ def resolver_env(hoy: dt.date | None = None, carpeta_ventas=None) -> dict[str, E
                 todos = crudos + (de_stock if clave in _fuentes.FUENTES_DE_STOCK else [])
                 desc = tuple(_descartados_por_patron(todos, clave, spec, specs))
         except Exception as e:  # noqa: BLE001 - queda como estado de la fuente
-            salida[clave] = Eleccion(hecho="error_lectura", mensaje=f"{type(e).__name__}: {e}",
-                                     carpetas_buscadas=(), **base)
+            salida[clave] = Eleccion(hecho="error_lectura", mensaje=_mensaje_de(e),
+                                     detalle=_detalle(e), carpetas_buscadas=(), **base)
             continue
         if elegidos:
             hecho = "encontrado"
@@ -1211,8 +1290,10 @@ def resolver_config(cfg: ConfigFuentes, hoy: dt.date | None = None,
     host = hostname or _hostname()
     resueltas = {c.clave: resolver_carpeta(c, host) for c in cfg.carpetas if c.activa}
     raices = [(c, r.ruta) for c, r in resueltas.items()]
-    activas = [f for f in cfg.fuentes if f.activa]
-    specs = {f.clave: f.spec() for f in activas if f.modo != "por_descarte"}
+    # Los patrones de TODAS las fuentes, tambien las desactivadas: una fuente que
+    # no se lee sigue siendo duena de sus archivos. Sin esto, desactivar el mix
+    # dejaba "BASE NUEVO MIX 2026_1.xlsx" como candidato a respaldo de venta.
+    specs = {f.clave: f.spec() for f in cfg.fuentes if f.modo != "por_descarte"}
     listados: dict[tuple, list[pathlib.Path]] = {}
 
     def _listar(raiz, recursiva, exts):
@@ -1228,7 +1309,10 @@ def resolver_config(cfg: ConfigFuentes, hoy: dt.date | None = None,
                     al_vencer=f.al_vencer, obligatoria=f.obligatoria,
                     diferencia_esperada=f.diferencia_esperada)
         if not f.activa:
-            salida[f.clave] = Eleccion(hecho="falta", mensaje="Desactivada en Fuentes de datos.", **base)
+            # No se lee, asi que no falta: no frena ni en activa (`_bloqueos`) ni
+            # "frenaria" en prueba. El panel la muestra gris.
+            salida[f.clave] = Eleccion(hecho="desactivada", mensaje="Desactivada en Fuentes de datos.",
+                                       **base)
             continue
         raices_f, buscadas, claves_buscadas = [], [], []
         for u in f.ubicaciones:
@@ -1263,8 +1347,9 @@ def resolver_config(cfg: ConfigFuentes, hoy: dt.date | None = None,
                 desc = (tuple(_descartados_por_patron(archivos, f.clave, f.spec(), specs))
                         if f.modo == "mas_reciente" else ())
         except Exception as e:  # noqa: BLE001 - queda como estado de la fuente
-            salida[f.clave] = Eleccion(hecho="error_lectura", mensaje=f"{type(e).__name__}: {e}",
-                                       carpetas_buscadas=tuple(buscadas), **base)
+            salida[f.clave] = Eleccion(hecho="error_lectura", mensaje=_mensaje_de(e),
+                                       detalle=_detalle(e), carpetas_buscadas=tuple(buscadas),
+                                       **base)
             continue
         if elegidos:
             hecho = "encontrado"
@@ -1319,33 +1404,51 @@ def _esperar_estable(p: pathlib.Path, pres: _Presupuesto) -> bool:
     return True
 
 
-def _copiar(origen: pathlib.Path, destino: pathlib.Path, pres: _Presupuesto) -> bool:
-    """Copia con `copy2` (conserva nombre, fecha y tamano: la huella del feed del
-    ERP no cambia). False si no termino a tiempo: un archivo solo en la nube se
-    baja al leerlo, y OneDrive puede quedarse pegado."""
-    destino.parent.mkdir(parents=True, exist_ok=True)
+def _con_tope(nombre: str, funcion, pres: _Presupuesto) -> tuple[bool, object]:
+    """(termino, resultado) de leer un ORIGINAL en un hilo, con tope de 10 minutos
+    por archivo y 15 en total. Un archivo solo en la nube se baja al leerlo, y
+    OneDrive puede quedarse pegado: sin tope, la corrida quedaba colgada hasta que
+    la tarea la cortaba a la hora, sin publicar. Un error se relanza aca."""
     tope = min(TOPE_COPIA_ARCHIVO_SEG, pres.copia)
     if tope <= 0:
-        return False
+        return False, None
     resultado: dict = {}
 
     def _hilo():
         try:
-            shutil.copy2(origen, destino)
-            resultado["ok"] = True
+            resultado["ok"] = funcion()
         except Exception as e:  # noqa: BLE001 - se relanza en el hilo principal
             resultado["error"] = e
 
     inicio = _reloj()
-    hilo = threading.Thread(target=_hilo, name=f"copia {origen.name}", daemon=True)
+    hilo = threading.Thread(target=_hilo, name=nombre, daemon=True)
     hilo.start()
     hilo.join(tope)
     pres.copia -= _reloj() - inicio
     if hilo.is_alive():
-        return False
+        return False, None
     if "error" in resultado:
         raise resultado["error"]
-    return True
+    return True, resultado.get("ok")
+
+
+def _copiar(origen: pathlib.Path, destino: pathlib.Path, pres: _Presupuesto) -> bool:
+    """Copia con `copy2` (conserva nombre, fecha y tamano: la huella del feed del
+    ERP no cambia). False si no termino a tiempo (ver `_con_tope`)."""
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    termino, _ = _con_tope(f"copia {origen.name}", lambda: shutil.copy2(origen, destino), pres)
+    return termino
+
+
+def _sha256_del_original(p: pathlib.Path, pres: _Presupuesto, *, bajar: bool) -> str | None:
+    """La huella de un archivo que NO se copio. None si no se pudo medir sin colgar
+    la corrida: solo esta en la nube y no se quiere bajar (`bajar=False`, en
+    `--probar` y en la oficial de un PC que no es el titular, que no copian nada),
+    o no termino de leerse a tiempo."""
+    if not bajar and estado_onedrive(p) == "solo_nube":
+        return None
+    termino, huella = _con_tope(f"huella {p.name}", lambda: sha256(p), pres)
+    return huella if termino else None
 
 
 def _abierto_en_excel(p: pathlib.Path) -> bool:
@@ -1371,13 +1474,13 @@ def _materializar(e: Eleccion, corrida_id: str, *, copiar: bool, hashear: bool,
                   anterior: dict, pres: _Presupuesto) -> FuenteElegida:
     """Copia y mide lo elegido. Un error aqui queda en la fuente: nunca sube."""
     if not e.elegidos:
-        return FuenteElegida(eleccion=e, hecho=e.hecho, mensaje=e.mensaje)
+        return FuenteElegida(eleccion=e, hecho=e.hecho, mensaje=e.mensaje, detalle=e.detalle)
     if e.uso != "lee":
         # Nadie la lee: ni se copia ni se mide.
         return FuenteElegida(eleccion=e, hecho=e.hecho, copias=tuple(a.ruta for a in e.elegidos),
                              sha256=tuple(None for _ in e.elegidos),
                              onedrive=tuple(estado_onedrive(a.ruta) for a in e.elegidos))
-    hecho, mensaje = e.hecho, e.mensaje
+    hecho, mensaje, detalle = e.hecho, e.mensaje, e.detalle
     copias, huellas, nube = [], [], []
     usados: set[str] = set()
     for a in e.elegidos:
@@ -1402,14 +1505,19 @@ def _materializar(e: Eleccion, corrida_id: str, *, copiar: bool, hashear: bool,
                 else:
                     hecho, mensaje = "inestable", "OneDrive no terminó de bajar el archivo."
             except Exception as ex:  # noqa: BLE001 - permiso, nube: estado de la fuente
-                hecho, mensaje = "error_lectura", f"No se pudo copiar {a.ruta.name}: {ex}"
+                hecho, mensaje = "error_lectura", f"No se pudo copiar {a.ruta.name}: {_causa(ex)}."
+                detalle = _detalle(ex)
         copias.append(leer)
         huella = None
         if hashear and (leer != a.ruta or not copiar):
             try:
-                huella = sha256(leer)
+                # La copia es local. Sin copiar (`--probar`, un PC que no es el
+                # titular) se mide el original: con tope y sin bajarlo de la nube.
+                huella = (sha256(leer) if leer != a.ruta
+                          else _sha256_del_original(leer, pres, bajar=False))
             except Exception as ex:  # noqa: BLE001
-                hecho, mensaje = "error_lectura", f"No se pudo leer {a.ruta.name}: {ex}"
+                hecho, mensaje = "error_lectura", f"No se pudo leer {a.ruta.name}: {_causa(ex)}."
+                detalle = _detalle(ex)
         huellas.append(huella)
     ant = anterior.get(e.clave) or {}
     mismo = bool(
@@ -1418,7 +1526,7 @@ def _materializar(e: Eleccion, corrida_id: str, *, copiar: bool, hashear: bool,
     )
     return FuenteElegida(
         eleccion=e, hecho=hecho, copias=tuple(copias), sha256=tuple(huellas),
-        onedrive=tuple(nube), mensaje=mensaje,
+        onedrive=tuple(nube), mensaje=mensaje, detalle=detalle if hecho == "error_lectura" else None,
         abierto_en_excel=any(_abierto_en_excel(a.ruta) for a in e.elegidos),
         mismo_contenido_que_anterior=mismo,
     )
@@ -1434,15 +1542,27 @@ def _limpiar_corridas(excepto: str) -> None:
 
 
 # ------------------------------------------------------------------- prueba
-def _misma_eleccion(env: Eleccion, plat: Eleccion) -> bool:
+def _misma_eleccion(env: Eleccion, plat: Eleccion, pres: _Presupuesto, *, bajar: bool) -> bool:
+    """Misma ruta, o mismo contenido. El contenido se compara leyendo los ORIGINALES
+    (la plataforma no copia en prueba): primero el tamano, que no lee nada, y la
+    huella solo si los tamanos calzan, con el tope de `_con_tope`. Lo que no se pudo
+    medir a tiempo, o que solo esta en la nube cuando no se baja, da "difiere"."""
     a = sorted(_clave_ruta(x.ruta) for x in env.elegidos)
     b = sorted(_clave_ruta(x.ruta) for x in plat.elegidos)
     if a == b:
         return True
     if len(a) != len(b):
         return False
+    if sorted(x.tamano for x in env.elegidos) != sorted(x.tamano for x in plat.elegidos):
+        return False
     try:
-        return sorted(sha256(x.ruta) for x in env.elegidos) == sorted(sha256(x.ruta) for x in plat.elegidos)
+        huellas = []
+        for lado in (env.elegidos, plat.elegidos):
+            de_este_lado = [_sha256_del_original(x.ruta, pres, bajar=bajar) for x in lado]
+            if None in de_este_lado:
+                return False
+            huellas.append(sorted(de_este_lado))
+        return huellas[0] == huellas[1]
     except OSError:
         return False
 
@@ -1453,30 +1573,46 @@ def _edad(a: Archivo, hoy: dt.date) -> int:
     return job.dias_habiles(dt.date.fromtimestamp(a.modificado), hoy)
 
 
-def comparar(env: dict[str, Eleccion], plat: dict[str, Eleccion], hoy: dt.date) -> dict[str, dict]:
+def _mas_nuevo(archivos) -> Archivo | None:
+    """El archivo con que se mide el plazo de una fuente: el mas nuevo. Ventas trae
+    dos respaldos y el del ano pasado ya no se toca; medido con el primero (el
+    orden es por nombre) la corrida frenaba todos los dias, mientras el panel
+    -que mide el mas nuevo- decia "Al día"."""
+    return max(archivos, key=lambda a: a.modificado) if archivos else None
+
+
+def comparar(env: dict[str, Eleccion], plat: dict[str, Eleccion], hoy: dt.date, *,
+             pres: _Presupuesto | None = None, bajar: bool = False) -> dict[str, dict]:
     """Por fuente: coincide | difiere | difiere_esperado | falta, el archivo que
-    tomaria la plataforma y, si corresponde, por que en `activa` esto frenaria."""
+    tomaria la plataforma y, si corresponde, por que en `activa` esto frenaria.
+
+    `bajar`: si se puede leer un archivo que solo esta en la nube para ver si es
+    el mismo (solo la corrida que copia); `pres`, el tope de tiempo de esas
+    lecturas."""
+    pres = pres if pres is not None else _Presupuesto()
     dups = _duplicados(plat)
     salida = {}
     for clave, e in env.items():
         p = plat.get(clave)
         if p is None or not p.elegidos:
             resultado = "falta"
-        elif _misma_eleccion(e, p):
+        elif _misma_eleccion(e, p, pres, bajar=bajar):
             resultado = "coincide"
         else:
             resultado = "difiere_esperado" if p.diferencia_esperada else "difiere"
         frenaria = None
-        if p is not None and p.uso == "lee":
+        # Una desactivada no se lee: en activa no frena por ella.
+        if p is not None and p.uso == "lee" and p.hecho != "desactivada":
             if p.obligatoria and p.hecho == "carpeta_no_encontrada":
                 frenaria = f"Este PC no tiene la carpeta de {p.nombre}"
             elif p.obligatoria and not p.elegidos:
                 frenaria = f"Falta el archivo de {p.nombre}"
             elif p.elegidos and p.frecuencia_dias and p.al_vencer == "frena":
-                edad = _edad(p.elegidos[0], hoy)
+                nuevo = _mas_nuevo(p.elegidos)
+                edad = _edad(nuevo, hoy)
                 if edad > p.frecuencia_dias:
                     # Lo lee la jefa en el panel ("En modo activa, esto frenaria (...)").
-                    frenaria = (f"{p.elegidos[0].ruta.name} tiene {edad} días hábiles y se "
+                    frenaria = (f"{nuevo.ruta.name} tiene {edad} días hábiles y se "
                                 f"espera cada {p.frecuencia_dias}")
             if frenaria is None and clave in dups:
                 frenaria = dups[clave]
@@ -1501,10 +1637,8 @@ def _listado(clave, nombre, raiz, metodo, probadas, avisos, por_ruta, hostnames,
     archivos, truncado = [], False
     if raiz is not None and raiz.is_dir():
         for p in listar(raiz, recursiva=True, extensiones=EXTENSIONES, avisos=avisos,
-                        hostnames=hostnames):
+                        hostnames=hostnames, niveles=LISTADO_MAX_NIVELES):
             rel = p.relative_to(raiz)
-            if len(rel.parts) - 1 > LISTADO_MAX_NIVELES:
-                continue
             if len(archivos) >= LISTADO_MAX_ARCHIVOS:
                 truncado = True
                 break
@@ -1548,8 +1682,13 @@ def _listado_de_carpetas(elecciones, resueltas, avisos, hostnames) -> list[dict]
         avisos.extend(a for a in r.avisos if a not in avisos)
         if r.ruta is not None:
             vistas.add(_clave_ruta(r.ruta))
+    configuradas = {l["clave"] for l in salida}
     for clave, d, variable in _raices_env():
-        if _clave_ruta(d) in vistas:
+        # La carpeta del .env que coincide por clave con una configurada pero esta
+        # en otra ruta (un ensayo que la movio, un PC sin %OneDriveCommercial%) no
+        # va: la plataforma guarda los listados por clave y se quedaba con este,
+        # asi que los selectores y la vista previa mostraban la carpeta del .env.
+        if _clave_ruta(d) in vistas or clave in configuradas:
             continue
         c = _carpeta_portable(d)
         salida.append(_listado(clave, c["nombre"] if c else d.name, d, "env", (str(d),), avisos,
@@ -1561,7 +1700,7 @@ def estado_de_fuente(f: FuenteElegida, lecturas: dict, hoy: dt.date, extra: dict
     e = f.eleccion
     leidas = [lecturas.get(str(c)) for c in f.copias]
     leidas = [x for x in leidas if x]
-    edad = _edad(e.elegidos[0], hoy) if e.elegidos else None
+    edad = _edad(_mas_nuevo(e.elegidos), hoy) if e.elegidos else None
     return {
         "nombre": e.nombre,
         "uso": e.uso,
@@ -1583,6 +1722,8 @@ def estado_de_fuente(f: FuenteElegida, lecturas: dict, hoy: dt.date, extra: dict
         "prueba": f.prueba,
         "extra": extra or {},
         "mensaje": f.mensaje,
+        # El error crudo, con la ruta: solo para el detalle de la fuente.
+        "detalle": f.detalle,
         "frecuencia_dias": e.frecuencia_dias,
         "al_vencer": e.al_vencer,
         "obligatoria": e.obligatoria,
@@ -1603,7 +1744,9 @@ def payload_de_reporte(corrida: dict, fase: str) -> dict:
             try:
                 fuentes[clave] = estado_de_fuente(f, lectores_excel.LECTURAS, hoy, extra)
             except Exception as e:  # noqa: BLE001 - una fuente rara no tumba el reporte
-                fuentes[clave] = {"hecho": "error_lectura", "mensaje": f"{type(e).__name__}: {e}"}
+                fuentes[clave] = {"hecho": "error_lectura",
+                                  "mensaje": "No se pudo armar el estado de esta fuente.",
+                                  "detalle": _detalle(e)}
     avisos = list(m.avisos if m is not None else ()) + list(corrida.get("avisos") or [])
     return {
         "id": corrida["id"],
@@ -1813,10 +1956,9 @@ def preparar_fuentes(corrida: dict, *, copiar: bool | None = None, hoy: dt.date 
         elecciones, resueltas = resolver_config(cfg, hoy, host)
     else:
         elecciones = resolver_env(hoy, carpeta_ventas)
-    prueba = None
+    plat = None
     if cfg is not None and modo == "prueba":
         plat, resueltas = resolver_config(cfg, hoy, host)
-        prueba = comparar(elecciones, plat, hoy)
 
     if copiar is None:
         copiar = corrida.get("tipo") != "probar" and (titular or corrida.get("tipo") != "oficial")
@@ -1824,12 +1966,17 @@ def preparar_fuentes(corrida: dict, *, copiar: bool | None = None, hoy: dt.date 
         _limpiar_corridas(corrida["id"])
     pres = _Presupuesto()
     anterior = (cfg.anterior if cfg is not None else {}) or {}
-    por_clave = {}
-    for clave, e in elecciones.items():
-        f = _materializar(e, corrida["id"], copiar=copiar, hashear=True, anterior=anterior, pres=pres)
-        if prueba is not None and clave in prueba:
-            f = replace(f, prueba=prueba[clave])
-        por_clave[clave] = f
+    por_clave = {
+        clave: _materializar(e, corrida["id"], copiar=copiar, hashear=True, anterior=anterior, pres=pres)
+        for clave, e in elecciones.items()
+    }
+    if plat is not None:
+        # Despues de copiar: lo que se lee tiene prioridad sobre el tope de tiempo, y
+        # la comparacion (que lee originales) usa lo que quede. Sin copiar, no baja
+        # nada de la nube solo para comparar.
+        prueba = comparar(elecciones, plat, hoy, pres=pres, bajar=copiar)
+        por_clave = {c: replace(f, prueba=prueba[c]) if c in prueba else f
+                     for c, f in por_clave.items()}
 
     avisos_listado: list[str] = []
     carpetas = _listado_de_carpetas(elecciones, resueltas, avisos_listado, hostnames)
@@ -1870,6 +2017,8 @@ def _imprimir_resumen(m: Manifiesto, copiar: bool) -> None:
     for clave, f in m.por_clave.items():
         if f.hecho in ("inestable", "error_lectura") and f.eleccion.uso == "lee":
             print(f"    {clave}: {f.mensaje}")
+            if f.detalle:
+                print(f"      ({f.detalle})")
         if f.prueba and f.prueba.get("frenaria"):
             print(f"    EN ACTIVA FRENARIA: {f.prueba['frenaria']}")
     if m.modo == "prueba":
@@ -1904,7 +2053,7 @@ def probar(reportar: bool = False) -> int:
     else:
         otra, _ = resolver_config(leer_config(corrida["config_efectiva"] or config_efectiva(m.pc)), hoy, m.pc)
         titulo = "semilla"
-    cmp = comparar(env, otra, hoy)
+    cmp = comparar(env, otra, hoy, bajar=False)
     print(f"\nEste PC: {m.pc}. Titular: {m.alias_titular or m.pc_titular or '(sin titular)'}"
           f"{'' if m.es_titular else '  -> este PC NO publica'}.")
     print(f"Configuracion: {m.origen}, modo {m.modo}. Se compara el .env con la {titulo}.\n")

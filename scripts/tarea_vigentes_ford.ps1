@@ -43,6 +43,9 @@ function Log($msg) {
     "[$(Get-Date -Format 'HH:mm:ss')] $msg" | Out-File $log -Append -Encoding utf8
 }
 
+# Que dijo el motor al final: si este PC ya no es el titular, no publico nada.
+. "$PSScriptRoot\salida_motor.ps1"
+
 "=== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" | Out-File $log -Append -Encoding utf8
 Log "Corrida semanal de vigentes FORD"
 
@@ -163,10 +166,17 @@ if ($codigoCorrida -eq 0) {
     # el margen seria de 5): el motor se llama aca, cuando el dato ya esta.
     Log "Lanzando el motor para publicar los datos nuevos..."
     Push-Location "$root\apps\api"
+    # Tee-Object -Variable: la salida sigue bajando al log linea a linea (con Out-File,
+    # en UTF-8) y ademas queda en $salidaMotor para revisar si este PC era el titular.
     & "$root\apps\api\.venv\Scripts\python.exe" -u -m src.jobs.correr_motor_real --oficial 2>&1 |
-        ForEach-Object { "$_" } | Out-File $log -Append -Encoding utf8
+        ForEach-Object { "$_" } | Tee-Object -Variable salidaMotor | Out-File $log -Append -Encoding utf8
     $codigoMotor = $LASTEXITCODE
-    if ($codigoMotor -eq 0) {
+    $titular = if ($codigoMotor -eq 0) { Titular-SiNoPublico $salidaMotor } else { $null }
+    if ($titular) {
+        # Sale con 0 a proposito, pero no calculo ni publico (ver salida_motor.ps1).
+        Log "El motor NO publico: este PC ya no es el titular (el titular es $titular)."
+        Log "En este PC hay que deshabilitar esta tarea (ver data/crudos/README.md)."
+    } elseif ($codigoMotor -eq 0) {
         Log "Motor OK: la plataforma ya tiene los reemplazos y precios nuevos."
     } else {
         # No se cambia $codigoCorrida: la extraccion SI funciono y el archivo quedo
