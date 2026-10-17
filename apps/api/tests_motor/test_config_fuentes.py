@@ -515,6 +515,27 @@ def test_abierto_en_excel_y_mismo_contenido_que_ayer(arbol, plataforma):
     assert m.por_clave["catalogo"].mismo_contenido_que_anterior is False
 
 
+def test_el_mismo_archivo_sin_tocar_no_es_mismo_contenido_con_fecha_nueva(arbol, plataforma):
+    """La corrida anterior lo reporto con la fecha al segundo; el archivo trae
+    milisegundos. Sin cambiar la fecha no hay "fecha nueva con contenido viejo"."""
+    stock = arbol.archivos["stock_bodegas"]
+    t = int(time.time()) - 600 + 0.7
+    os.utime(stock, (t, t))
+    cfg = semilla("prueba")
+    cfg["anterior"] = {"stock_bodegas": {"sha256": cf.sha256(stock),
+                                         "modificado_en": cf._iso(stock.stat().st_mtime),
+                                         "filas": 10}}
+    plataforma.config = cfg
+
+    _, m = _manifiesto()
+    assert m.por_clave["stock_bodegas"].mismo_contenido_que_anterior is False
+
+    # Un segundo despues, mismo contenido: eso si es el caso del 09-10.
+    os.utime(stock, (t + 1, t + 1))
+    _, m = _manifiesto()
+    assert m.por_clave["stock_bodegas"].mismo_contenido_que_anterior is True
+
+
 # --- sin_configurar y prueba publican EXACTAMENTE lo mismo -------------------------
 
 
@@ -657,6 +678,18 @@ def test_el_reporte_dice_que_archivo_leyo_cada_fuente_y_de_donde(arbol, platafor
     assert ajeno["elegido"] is False
 
 
+def test_el_listado_marca_un_archivo_compartido_con_la_fuente_que_lo_lee(arbol, plataforma):
+    """"Lista de precio ford.xlsx" la eligen precios_ford (se lee) y precios_proveedor
+    (solo se reconoce). En el listado del panel tiene que figurar la que lo lee."""
+    plataforma.config = {"modo": "sin_configurar"}
+    corrida, _ = _manifiesto()
+
+    carpetas = {c["clave"]: c for c in cf.payload_de_reporte(corrida, "inicio")["reporte"]["carpetas"]}
+    ford = next(a for a in carpetas["bases_de_datos"]["archivos"]
+                if a["ruta_relativa"] == "Lista de precios/Lista de precio ford.xlsx")
+    assert (ford["fuente"], ford["elegido"]) == ("precios_ford", True)
+
+
 def test_si_el_reporte_falla_la_corrida_no_cambia_y_queda_pendiente(arbol, plataforma, correr):
     plataforma.config = {"modo": "sin_configurar"}
     plataforma.falla_post = RuntimeError("502 Bad Gateway")
@@ -792,3 +825,19 @@ def test_probar_reportar_manda_la_config_efectiva_con_tipo_probar(arbol, platafo
     assert (r["tipo"], r["fase"], r["resultado"]) == ("probar", "fin", "ok")
     assert {f["clave"] for f in r["config_efectiva"]["fuentes"]} == set(fuentes.FUENTES)
     assert not cf.CACHE.exists()
+
+
+def test_probar_reportar_reenvia_lo_que_quedo_pendiente(arbol, plataforma):
+    """El PC de la jefa solo corre `--probar --reportar` hasta ser titular: lo que no
+    llego un dia sin red se manda al dia siguiente, antes del reporte nuevo."""
+    plataforma.config = {"modo": "sin_configurar"}
+    plataforma.falla_post = RuntimeError("sin red")
+    assert cf.main(["--probar", "--reportar"]) == 0
+    (pendiente,) = cf.PENDIENTES_DIR.glob("*.json")
+    ayer = json.loads(pendiente.read_text(encoding="utf-8"))["id"]
+
+    plataforma.falla_post = None
+    assert cf.main(["--probar", "--reportar"]) == 0
+
+    assert [r["id"] for r in plataforma.reportes][0] == ayer and len(plataforma.reportes) == 2
+    assert not list(cf.PENDIENTES_DIR.glob("*.json"))

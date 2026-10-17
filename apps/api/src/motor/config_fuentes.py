@@ -1355,8 +1355,14 @@ def _abierto_en_excel(p: pathlib.Path) -> bool:
 
 
 def _posterior(a: float, b) -> bool:
+    """¿La fecha `a` (mtime) es posterior a `b` (la ISO de la corrida anterior)?
+
+    Al segundo: el reporte manda las fechas sin fraccion (`_iso`), asi que el mismo
+    archivo sin tocar volvia como "mas nuevo" por los milisegundos, y el panel decia
+    "la fecha cambio, pero el contenido es identico" de un stock que nadie movio."""
     try:
-        return dt.datetime.fromtimestamp(a).astimezone() > dt.datetime.fromisoformat(str(b))
+        return (dt.datetime.fromtimestamp(a).astimezone().replace(microsecond=0)
+                > dt.datetime.fromisoformat(str(b)))
     except (TypeError, ValueError):
         return False
 
@@ -1469,8 +1475,9 @@ def comparar(env: dict[str, Eleccion], plat: dict[str, Eleccion], hoy: dt.date) 
             elif p.elegidos and p.frecuencia_dias and p.al_vencer == "frena":
                 edad = _edad(p.elegidos[0], hoy)
                 if edad > p.frecuencia_dias:
-                    frenaria = (f"{p.elegidos[0].ruta.name}: {edad} dias habiles (se espera al dia "
-                                f"cada {p.frecuencia_dias})")
+                    # Lo lee la jefa en el panel ("En modo activa, esto frenaria (...)").
+                    frenaria = (f"{p.elegidos[0].ruta.name} tiene {edad} días hábiles y se "
+                                f"espera cada {p.frecuencia_dias}")
             if frenaria is None and clave in dups:
                 frenaria = dups[clave]
         salida[clave] = {
@@ -1523,11 +1530,15 @@ def _fuente_por_nombre(nombre: str) -> str | None:
 
 
 def _listado_de_carpetas(elecciones, resueltas, avisos, hostnames) -> list[dict]:
+    # Un archivo que eligen una fuente que se lee y otra que solo se reconoce
+    # (hoy "Lista de precio ford.xlsx": precios_ford y precios_proveedor) se marca
+    # con la que lo lee: el panel tiene que decir quien lo usa de verdad.
+    lee_primero = sorted(elecciones.items(), key=lambda kv: kv[1].uso != "lee")
     por_ruta: dict[str, tuple[str, bool]] = {}
-    for clave, e in elecciones.items():
+    for clave, e in lee_primero:
         for a in e.candidatos:
             por_ruta.setdefault(_clave_ruta(a.ruta), (clave, False))
-    for clave, e in elecciones.items():
+    for clave, e in reversed(lee_primero):
         for a in e.elegidos:
             por_ruta[_clave_ruta(a.ruta)] = (clave, True)
     salida, vistas = [], set()
@@ -1911,6 +1922,9 @@ def probar(reportar: bool = False) -> int:
         if cmp.get(c, {}).get("frenaria"):
             print(f"  en activa frenaria: {cmp[c]['frenaria']}")
     if reportar:
+        # Un PC que solo prueba (el de la jefa antes de ser titular) nunca corre
+        # `_correr`: si no reenviara aca, un dia sin red quedaba sin llegar al panel.
+        reenviar_pendientes()
         corrida.update(resultado="ok", terminada_en=_ahora_iso())
         if enviar_reporte(payload_de_reporte(corrida, "fin")):
             print("Reporte enviado a la plataforma (tipo probar).")
