@@ -289,6 +289,19 @@ def test_el_acceso_no_lanza_un_segundo_motor(pc):
 # --- Codificacion de los scripts --------------------------------------------------
 
 
+def test_el_instalador_de_doble_clic_es_ascii_con_crlf():
+    """cmd.exe lee el .cmd en la pagina de codigos de la consola (las tildes salen
+    rotas) y con saltos de linea Unix puede saltarse lineas o etiquetas. Se manda
+    suelto por correo, asi que tiene que estar bien sin pasar por git."""
+    datos = (SCRIPTS.parent / "INSTALAR PLATAFORMA.cmd").read_bytes()
+    assert datos.isascii()
+    assert datos.count(b"\n") == datos.count(b"\r\n") > 0
+    texto = datos.decode("ascii")
+    assert "scripts\\instalar_pc_jefa.ps1" in texto
+    assert ("raw.githubusercontent.com/platoniaaa/Sugerencia-SaaS-para-sucursales.-/"
+            "arreglar-job-diario/scripts/instalar_pc_jefa.ps1") in texto
+
+
 @pytest.mark.parametrize("ruta", sorted(SCRIPTS.glob("*.ps1")), ids=lambda p: p.name)
 def test_cada_script_es_ascii_o_utf8_con_bom(ruta):
     """Windows PowerShell 5.1 lee como Windows-1252 un .ps1 en UTF-8 sin BOM: una
