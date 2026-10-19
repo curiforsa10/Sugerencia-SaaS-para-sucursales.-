@@ -150,12 +150,17 @@ else {
 # ------------------------------------------------------------------ 2) Motor
 Titulo "[2/2] Calculando y publicando el sugerido (25 a 35 minutos)"
 Write-Host "    Puedes usar el PC. No lo apagues ni cierres la sesión hasta que termine."
+Write-Host "    Si cierras esta ventana, el cálculo sigue igual (solo dejas de ver el avance)."
 $log = "$root\logs\motor_$(Get-Date -Format 'yyyy-MM-dd').log"
 $desde = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
 
 # tarea_diaria.ps1 escribe solo en el log: se lanza aparte y se va mostrando lo que
-# agrega, sin cambiar nada de cómo corre a las 09:30.
-$proceso = Start-Process -FilePath "powershell.exe" -NoNewWindow -PassThru -ArgumentList @(
+# agrega, sin cambiar nada de cómo corre a las 09:30. En su propia consola oculta y
+# no en esta: cerrar esta ventana a mitad mataba al motor en plena publicación. Y
+# sin el PYTHONIOENCODING de arriba (era para el programa del ERP), para que el log
+# quede escrito igual que el de las 09:30.
+Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue
+$proceso = Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -PassThru -ArgumentList @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSScriptRoot\tarea_diaria.ps1`"")
 $null = $proceso.Handle  # sin esto, ExitCode queda vacío al terminar (PowerShell 5.1)
 
