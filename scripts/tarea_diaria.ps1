@@ -13,6 +13,12 @@
 # primera: el log quedaba en 32 bytes (solo el encabezado), sin el traceback ni la
 # linea RESULTADO. El motor fallo cinco dias seguidos y el log no dijo por que.
 $ErrorActionPreference = "Continue"
+# El motor escribe en UTF-8 y PowerShell lo lee en UTF-8. Sin esto Python escribia en
+# Windows-1252 y PowerShell lo leia en la pagina de la consola (850): en el log y en
+# la ventana del acceso "Actualizar plataforma" cada tilde y cada enie salian como
+# otra letra.
+$env:PYTHONIOENCODING = "utf-8"
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $root = Split-Path $PSScriptRoot -Parent
 $logDir = "$root\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }

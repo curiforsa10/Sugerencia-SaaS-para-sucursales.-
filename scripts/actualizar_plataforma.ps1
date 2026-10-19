@@ -10,7 +10,8 @@
 #  La ventana muestra el avance y al final dice qué pasó y qué hacer.
 #
 #  Como deja la línea RESULTADO en el log del día, la tarea de las 09:30
-#  (tarea_si_no_corrio_hoy.ps1) ya no calcula otra vez.
+#  (tarea_si_no_corrio_hoy.ps1) ya no calcula otra vez si salió bien; si falló, la
+#  vuelve a intentar.
 #
 #  Lo deja en el Escritorio instalar_pc_jefa.ps1. La carpeta del programa del ERP
 #  sale del .env (ROBOT_ERP_DIR).
@@ -75,6 +76,14 @@ if ($enCurso) {
     Mal "El motor ya está calculando en este PC (desde $enCurso)."
     Write-Host "    Espera a que termine (unos 30 minutos) y vuelve a intentarlo si hace falta."
     Write-Host "    Lo que está corriendo va a publicar solo."
+    Terminar 1
+}
+# Un admin apretó "Actualizar motor" en la web: el agente está bajando la versión nueva
+# y quizás reinstalando librerías. Un motor ahora importaría código a medio cambiar.
+$motorAct = ActualizacionMotor-EnCurso $root
+if ($motorAct) {
+    Mal "En este PC se está instalando una versión nueva del motor (la pidió un admin desde la web, a las $(([datetime]$motorAct).ToString('HH:mm')))."
+    Write-Host "    Tarda 1 a 3 minutos. Espera a que termine y vuelve a hacer doble clic en este acceso."
     Terminar 1
 }
 Set-Content -Path $candado -Value "$PID $($inicio.ToString('yyyy-MM-dd HH:mm:ss'))" -Encoding ascii
@@ -144,6 +153,22 @@ else {
         Write-Host "        La tarea de las 09:30 calcula igual con lo que haya."
         Terminar 1
     }
+    # El programa sale con 0 si bajó todo, aunque no haya podido dejar la copia en
+    # 'Bases de datos' (por ejemplo, el archivo estaba abierto en Excel): solo lo anota.
+    # El motor lee esa copia: con la de ayer, que pasa la guarda de frescura, publicaba
+    # datos viejos y esta ventana decía LISTO.
+    $copiasMal = @($salidaRobot | Where-Object { $_ -match 'Copia local FALLO|Copia local: no existe' })
+    if ($copiasMal.Count -gt 0) {
+        Write-Host ""
+        Mal "El programa del ERP bajó las tablas, pero no pudo dejar la copia en 'Bases de datos'."
+        foreach ($c in ($copiasMal | Select-Object -Last 5)) {
+            Write-Host "      $(($c -replace '^\S+ \S+ \[\w+\]\s*', '').Trim())" -ForegroundColor Yellow
+        }
+        Write-Host ""
+        Write-Host "    El sugerido NO se calculó: el motor habría leído el archivo de ayer." -ForegroundColor Yellow
+        Write-Host "    Qué hacer: cierra los Excel de la carpeta 'Bases de datos' y vuelve a usar este acceso."
+        Terminar 1
+    }
     Bien "Tablas del ERP listas. Ya puedes usar el PC."
 }
 
@@ -156,10 +181,8 @@ $desde = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
 
 # tarea_diaria.ps1 escribe solo en el log: se lanza aparte y se va mostrando lo que
 # agrega, sin cambiar nada de cómo corre a las 09:30. En su propia consola oculta y
-# no en esta: cerrar esta ventana a mitad mataba al motor en plena publicación. Y
-# sin el PYTHONIOENCODING de arriba (era para el programa del ERP), para que el log
-# quede escrito igual que el de las 09:30.
-Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue
+# no en esta: cerrar esta ventana a mitad mataba al motor en plena publicación. El
+# log queda en UTF-8 (tarea_diaria.ps1 se encarga), y aquí se lee igual.
 $proceso = Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -PassThru -ArgumentList @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSScriptRoot\tarea_diaria.ps1`"")
 $null = $proceso.Handle  # sin esto, ExitCode queda vacío al terminar (PowerShell 5.1)
@@ -227,6 +250,14 @@ else {
               Select-Object -Last 3
     foreach ($m in $motivo) { Write-Host "      $($m.Trim())" -ForegroundColor Yellow }
     Write-Host "    Los admin reciben un aviso en la campanita de la plataforma con el motivo."
+    # La tarea de las 09:30 vuelve a calcular si la última corrida del día falló, y si
+    # este acceso partió antes de esa hora, la tarea lo está esperando.
+    if ($inicio.TimeOfDay -lt [TimeSpan]::Parse("09:30")) {
+        Write-Host "    A las 09:30 se vuelve a intentar solo (o apenas termine esto, si ya pasó esa hora)."
+    }
+    else {
+        Write-Host "    La tarea de las 09:30 ya pasó, así que hoy no se vuelve a intentar sola."
+    }
     Write-Host "    Qué hacer: si el motivo es un archivo desactualizado, vuelve a usar este acceso"
     Write-Host "    (baja las tablas de nuevo). Si es otra cosa, avísale a quien mantiene el motor."
     $codigoFinal = 1

@@ -4,6 +4,8 @@
 #  Lo cargan los scripts que corren el motor sin nadie mirando:
 #  agente_actualizacion.ps1 (los botones "Actualizar ahora" y "Actualizar motor"),
 #  tarea_vigentes_ford.ps1, tarea_si_no_corrio_hoy.ps1 y actualizar_plataforma.ps1.
+#  Tambien sabe si hay otra cosa trabajando en este PC (los candados del motor, del
+#  acceso "Actualizar plataforma" y del agente).
 #    . "$PSScriptRoot\salida_motor.ps1"
 #
 #  Que el motor salga con 0 no quiere decir que publico. En un PC que no es el
@@ -34,6 +36,31 @@ function Filas-Publicadas($salida) {
     return $null
 }
 
+# Si el proceso que dejo un candado ("<PID> <fecha>") sigue vivo y es el mismo. Windows
+# recicla los PID, asi que el numero puede ser ahora de otro proceso con el mismo nombre:
+# el agente lanza un PowerShell cada minuto, y la tarea de las 09:30 corre en otro. Un
+# candado viejo del acceso (la ventana se cerro con la X, o se apago el PC) con el PID
+# de cualquiera de ellos dejaba el dia sin calcular. Por eso, ademas del nombre:
+#   - quien pregunta no es quien dejo el candado (si lo fuera, no estaria preguntando);
+#   - el proceso partio antes de la fecha anotada (unos segundos de margen: la fecha va
+#     sin fracciones). Si partio despues, es otro que heredo el numero.
+# Si la fecha no se puede leer, o Windows no deja ver cuando partio el proceso, se
+# confia en el nombre, como antes.
+function Proceso-DelCandado([int]$id, [string]$desde, [string]$nombre) {
+    if ($id -eq $PID) { return $false }
+    $proceso = Get-Process -Id $id -ErrorAction SilentlyContinue
+    if (-not $proceso -or $proceso.ProcessName -notlike $nombre) { return $false }
+    $fecha = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($desde, "yyyy-MM-dd HH:mm:ss",
+            [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$fecha)) {
+        return $true
+    }
+    $inicio = $null
+    try { $inicio = $proceso.StartTime } catch { }
+    if ($inicio -and $inicio -gt $fecha.AddSeconds(5)) { return $false }
+    return $true
+}
+
 # Si hay una corrida del motor en curso en este PC: la fecha de inicio que anoto
 # el motor en su candado (apps/api/data/motor.lock, "<PID> <fecha>"). $null si no
 # hay candado, o si el proceso que lo dejo ya no existe: el motor pisa ese candado
@@ -45,9 +72,9 @@ function Corrida-EnCurso($root) {
     if (-not (Test-Path $candado)) { return $null }
     $texto = "$(Get-Content $candado -Raw -ErrorAction SilentlyContinue)".Trim()
     if ($texto -notmatch '^(\d+)\s*(.*)$') { return $null }
+    $id = [int]$matches[1]
     $desde = $matches[2].Trim()
-    $proceso = Get-Process -Id ([int]$matches[1]) -ErrorAction SilentlyContinue
-    if (-not $proceso -or $proceso.ProcessName -notlike "python*") { return $null }
+    if (-not (Proceso-DelCandado $id $desde "python*")) { return $null }
     if (-not $desde) { $desde = "hora desconocida" }
     return $desde
 }
@@ -62,9 +89,25 @@ function Actualizacion-EnCurso($root) {
     if (-not (Test-Path $candado)) { return $null }
     $texto = "$(Get-Content $candado -Raw -ErrorAction SilentlyContinue)".Trim()
     if ($texto -notmatch '^(\d+)\s*(.*)$') { return $null }
+    $id = [int]$matches[1]
     $desde = $matches[2].Trim()
-    $proceso = Get-Process -Id ([int]$matches[1]) -ErrorAction SilentlyContinue
-    if (-not $proceso -or $proceso.ProcessName -notlike "powershell*") { return $null }
+    if (-not (Proceso-DelCandado $id $desde "powershell*")) { return $null }
     if (-not $desde) { $desde = "hora desconocida" }
+    return $desde
+}
+
+# Si el agente esta atendiendo un "Actualizar motor" en este PC: la fecha en que lo
+# tomo. $null si no. Mientras hace git merge y reinstala las librerias no hay que
+# lanzar el motor: importaria una mezcla de codigo viejo y nuevo, o un polars a medio
+# reinstalar, y caeria antes de dejar incidencia; o al reves, pip fallaria por
+# archivos en uso. El agente anota en su candado (.agente.lock) "<PID> <fecha> <tipo>".
+function ActualizacionMotor-EnCurso($root) {
+    $candado = Join-Path $root ".agente.lock"
+    if (-not (Test-Path $candado)) { return $null }
+    $texto = "$(Get-Content $candado -Raw -ErrorAction SilentlyContinue)".Trim()
+    if ($texto -notmatch '^(\d+)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+actualizar_motor$') { return $null }
+    $id = [int]$matches[1]
+    $desde = $matches[2]
+    if (-not (Proceso-DelCandado $id $desde "powershell*")) { return $null }
     return $desde
 }

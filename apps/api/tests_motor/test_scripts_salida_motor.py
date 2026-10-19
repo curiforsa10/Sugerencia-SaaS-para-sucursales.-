@@ -8,10 +8,12 @@ El caso que cuidan: en un PC que no es el titular, el motor no calcula ni public
 sale con 0 a proposito. El agente tomaba ese 0 como "OK" y la tarjeta de la web
 quedaba en verde sin que se hubiera publicado nada.
 """
+import datetime as dt
 import json
 import pathlib
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -62,11 +64,11 @@ def test_las_filas_sin_la_linea_de_carga_no_revientan(tmp_path):
     assert _llamar(tmp_path, "Filas-Publicadas", NO_TITULAR) == "<nulo>"
 
 
-def _corrida_en_curso(raiz) -> str:
+def _en_curso(raiz, funcion="Corrida-EnCurso", antes="") -> str:
     comando = (
         "$ErrorActionPreference = 'Stop'; "
-        f". '{SCRIPTS / 'salida_motor.ps1'}'; "
-        f"$r = Corrida-EnCurso '{raiz}'; "
+        f". '{SCRIPTS / 'salida_motor.ps1'}'; {antes}"
+        f"$r = {funcion} '{raiz}'; "
         "if ($null -eq $r) { '<nulo>' } else { $r }"
     )
     r = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -75,10 +77,27 @@ def _corrida_en_curso(raiz) -> str:
     return r.stdout.strip()
 
 
-def _candado(raiz, pid):
+def _corrida_en_curso(raiz) -> str:
+    return _en_curso(raiz)
+
+
+def _ahora(minutos=0) -> str:
+    """La fecha como la anotan los candados. Un candado se escribe despues de que parte
+    su proceso: la fecha de hoy y no una fija (con una fija anterior al arranque del
+    proceso, el candado parece de un PID reciclado)."""
+    return (dt.datetime.now() + dt.timedelta(minutes=minutos)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _candado(raiz, pid, desde=None) -> str:
+    desde = desde or _ahora()
     (raiz / "apps" / "api" / "data").mkdir(parents=True, exist_ok=True)
-    (raiz / "apps" / "api" / "data" / "motor.lock").write_text(
-        f"{pid} 2026-10-19 09:30:05", encoding="utf-8")
+    (raiz / "apps" / "api" / "data" / "motor.lock").write_text(f"{pid} {desde}", encoding="utf-8")
+    return desde
+
+
+def _powershell_vivo(segundos=60) -> subprocess.Popen:
+    return subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
+                             f"Start-Sleep -Seconds {segundos}"])
 
 
 def test_corrida_en_curso_mira_que_el_proceso_del_candado_siga_vivo(tmp_path):
@@ -91,8 +110,8 @@ def test_corrida_en_curso_mira_que_el_proceso_del_candado_siga_vivo(tmp_path):
 
     assert _corrida_en_curso(tmp_path) == "<nulo>", "sin candado"
 
-    _candado(tmp_path, os.getpid())  # este test corre en Python, como el motor
-    assert _corrida_en_curso(tmp_path) == "2026-10-19 09:30:05"
+    desde = _candado(tmp_path, os.getpid())  # este test corre en Python, como el motor
+    assert _corrida_en_curso(tmp_path) == desde
 
     muerto = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
                             capture_output=True, text=True, check=True)
@@ -106,6 +125,65 @@ def test_corrida_en_curso_mira_que_el_proceso_del_candado_siga_vivo(tmp_path):
         assert _corrida_en_curso(tmp_path) == "<nulo>"
     finally:
         otro.kill()
+
+
+def test_un_candado_viejo_con_el_pid_reciclado_no_cuenta(tmp_path):
+    """La ventana del acceso se cerro con la X (o se apago el PC) y su candado quedo.
+    Windows recicla los PID: si el numero queda en otro PowerShell vivo -el agente
+    lanza uno cada minuto, y la tarea de las 09:30 corre en otro- la tarea esperaba 60
+    minutos y salia sin calcular. El proceso tiene que haber partido antes de la fecha
+    del candado, y quien pregunta nunca es quien lo dejo."""
+    lock = tmp_path / ".actualizar_plataforma.lock"
+
+    # El mismo proceso que pregunta (el caso de la tarea de las 09:30).
+    propio = f"Set-Content '{lock}' \"$PID {_ahora(-60)}\" -Encoding ascii; "
+    assert _en_curso(tmp_path, "Actualizacion-EnCurso", propio) == "<nulo>"
+
+    ventana = _powershell_vivo()
+    try:
+        lock.write_text(f"{ventana.pid} {_ahora(-60)}", encoding="ascii")
+        assert _en_curso(tmp_path, "Actualizacion-EnCurso") == "<nulo>", "partio despues del candado"
+
+        ahora = _ahora()
+        lock.write_text(f"{ventana.pid} {ahora}", encoding="ascii")
+        assert _en_curso(tmp_path, "Actualizacion-EnCurso") == ahora, "es la ventana que lo dejo"
+    finally:
+        ventana.kill()
+
+    # Lo mismo con el candado del motor: un Python que partio despues no es esa corrida.
+    otro = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        _candado(tmp_path, otro.pid, _ahora(-60))
+        assert _corrida_en_curso(tmp_path) == "<nulo>"
+    finally:
+        otro.kill()
+
+
+def test_actualizacion_del_motor_en_curso_mira_el_candado_del_agente(tmp_path):
+    """La tarea de las 09:30 y el acceso no lanzan el motor mientras el agente hace git
+    merge y pip install de un "Actualizar motor"."""
+    lock = tmp_path / ".agente.lock"
+    assert _en_curso(tmp_path, "ActualizacionMotor-EnCurso") == "<nulo>", "sin candado"
+
+    agente = _powershell_vivo()
+    try:
+        ahora = _ahora()
+        lock.write_text(f"{agente.pid} {ahora} actualizar_motor", encoding="ascii")
+        assert _en_curso(tmp_path, "ActualizacionMotor-EnCurso") == ahora
+
+        # Un recalculo no cuenta: ese ya deja el candado del motor.
+        lock.write_text(f"{agente.pid} {ahora} recalcular", encoding="ascii")
+        assert _en_curso(tmp_path, "ActualizacionMotor-EnCurso") == "<nulo>"
+    finally:
+        agente.kill()
+
+    muerto = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                            capture_output=True, text=True, check=True)
+    lock.write_text(f"{int(muerto.stdout)} {_ahora()} actualizar_motor", encoding="ascii")
+    assert _en_curso(tmp_path, "ActualizacionMotor-EnCurso") == "<nulo>", "el agente se corto"
+
+    lock.write_text("", encoding="ascii")  # el de un agente anterior, sin PID
+    assert _en_curso(tmp_path, "ActualizacionMotor-EnCurso") == "<nulo>"
 
 
 def test_los_dos_scripts_miran_si_el_pc_es_el_titular():

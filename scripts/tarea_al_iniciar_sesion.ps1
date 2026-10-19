@@ -6,7 +6,8 @@
 #  y tampoco la recupera despues (evento 332, "user not logged-on"). Esta tarea
 #  corre al iniciar sesion y lanza la corrida del dia SOLO si:
 #    - ya pasaron las 09:30 (antes, la corre la tarea diaria a su hora);
-#    - hoy no hubo corrida (el log del dia no tiene la linea RESULTADO);
+#    - hoy no hubo una corrida que saliera bien (la ultima linea RESULTADO del log
+#      del dia no es OK: si fallo, se vuelve a intentar);
 #    - no hay otra corrida en curso (candado del motor con su proceso vivo).
 #  Asi no corre dos veces ni antes que el programa del ERP.
 #

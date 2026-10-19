@@ -14,6 +14,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -57,16 +58,24 @@ class _Pc:
     def motor_llamado(self) -> bool:
         return (self.raiz / "tarea_diaria_llamada.txt").exists()
 
-    def candado(self, pid: int):
+    def candado(self, pid: int) -> str:
+        """El candado del motor, con la fecha de ahora: un candado se escribe despues de
+        que parte su proceso (con una fecha anterior, parece de un PID reciclado)."""
+        desde = _ahora()
         (self.raiz / "apps" / "api" / "data").mkdir(parents=True, exist_ok=True)
-        (self.raiz / "apps" / "api" / "data" / "motor.lock").write_text(
-            f"{pid} 2026-10-19 09:30:05", encoding="utf-8")
+        (self.raiz / "apps" / "api" / "data" / "motor.lock").write_text(f"{pid} {desde}", encoding="utf-8")
+        return desde
 
-    def correr(self, script: str, *args) -> subprocess.CompletedProcess:
+    def correr(self, script: str, *args, entorno: dict | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
             [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
              "-File", str(self.raiz / "scripts" / script), *args],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+            env=entorno)
+
+
+def _ahora() -> str:
+    return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 @pytest.fixture
@@ -133,9 +142,16 @@ def _ventana_del_acceso(pc, segundos: int, escribe_resultado: bool = False) -> s
                f"; 'RESULTADO: OK' | Out-File '{pc.log}' -Append -Encoding utf8")
     ventana = subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
                                 f"Start-Sleep -Seconds {segundos}{fin}"])
-    (pc.raiz / ".actualizar_plataforma.lock").write_text(
-        f"{ventana.pid} 2026-10-19 09:25:00", encoding="ascii")
+    (pc.raiz / ".actualizar_plataforma.lock").write_text(f"{ventana.pid} {_ahora()}", encoding="ascii")
     return ventana
+
+
+def _actualizando_motor(pc, segundos: int) -> subprocess.Popen:
+    """Un agente vivo atendiendo un "Actualizar motor": su candado lleva el tipo."""
+    agente = subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
+                               f"Start-Sleep -Seconds {segundos}"])
+    (pc.raiz / ".agente.lock").write_text(f"{agente.pid} {_ahora()} actualizar_motor", encoding="ascii")
+    return agente
 
 
 def test_a_las_0930_espera_al_acceso_y_no_repite_si_el_publico(pc):
@@ -160,6 +176,46 @@ def test_si_el_acceso_termina_sin_publicar_la_tarea_calcula(pc):
         ventana.kill()
 
     assert pc.motor_llamado
+
+
+def test_si_la_corrida_de_la_manana_fallo_a_las_0930_se_vuelve_a_intentar(pc):
+    """El acceso de las 08:40 bajo todo, pero la carga dio 502 (Render se reinicio, como
+    el 29-09, el 30-09 y el 02-10). Antes la tarea de las 09:30 veia la linea RESULTADO,
+    salia con 0 y el dia quedaba sin sugerido nuevo."""
+    pc.log.parent.mkdir(parents=True)
+    pc.log.write_text("=== 2026-10-19 08:40:00 ===\nERROR: la plataforma respondio 502\n"
+                      "RESULTADO: FALLO (codigo 1)\n", encoding="utf-8-sig")
+
+    pc.correr("tarea_si_no_corrio_hoy.ps1")
+
+    assert pc.motor_llamado
+
+
+def test_si_despues_de_una_falla_salio_bien_no_se_repite(pc):
+    """Decide la ultima linea RESULTADO del dia (la del agente tambien cuenta)."""
+    pc.log.parent.mkdir(parents=True)
+    pc.log.write_text("=== 2026-10-19 08:40:00 ===\nRESULTADO: FALLO (codigo 1)\n"
+                      "=== 2026-10-19 09:02:00 (agente: Actualizar ahora) ===\n"
+                      "CARGA OFICIAL: 18254 filas.\nRESULTADO: OK (agente)\n", encoding="utf-8-sig")
+
+    pc.correr("tarea_si_no_corrio_hoy.ps1")
+
+    assert not pc.motor_llamado
+
+
+def test_a_las_0930_espera_a_que_termine_una_actualizacion_del_motor(pc):
+    """Un admin aprieta "Actualizar motor" a las 09:29 y el agente esta en pip install:
+    un motor lanzado encima importaria librerias a medio reinstalar."""
+    agente = _actualizando_motor(pc, 6)
+    try:
+        partio = time.monotonic()
+        pc.correr("tarea_si_no_corrio_hoy.ps1", "-EsperaSeg", "1", "-EsperaMaxMin", "2")
+        espero = time.monotonic() - partio
+    finally:
+        agente.kill()
+
+    assert pc.motor_llamado
+    assert espero >= 4, f"lanzo el motor sin esperar ({espero:.1f} s)"
 
 
 def test_al_iniciar_sesion_antes_de_las_0930_no_corre(pc):
@@ -202,7 +258,7 @@ def test_devuelve_el_codigo_de_la_corrida(pc):
 # El programa del ERP falso, con el aviso de "no toques el PC" del de verdad. Un
 # pywinauto vacio al lado basta para que se lo reconozca como instalado.
 _ROBOT_FALSO = """\
-import sys
+import os, sys
 print("\\u00a7PC\\u00a7|0|Descargando de Flexline - NO uses el mouse/teclado")
 print("  OK stock_curifor")
 if sys.argv[1:4] != ["descargar", "--tablas",
@@ -212,6 +268,12 @@ if sys.argv[1:4] != ["descargar", "--tablas",
 if open("codigo_robot.txt").read().strip() != "0":
     print("  FALLO seguimiento_frontera")
     sys.exit(1)
+if os.path.exists("copia_falla.txt"):
+    # Lo que escribe el de verdad (flexline_flows.py, _copiar_copias_locales) cuando el
+    # archivo de destino esta abierto en Excel. Igual sale con 0: solo mira las descargas.
+    print("2026-10-19 09:05:41,028 [ERROR] Copia local FALLO stock_frontera.xlsx -> "
+          "C:\\\\OneDrive\\\\Bases de datos\\\\stock: [WinError 32] El proceso no tiene acceso al "
+          "archivo porque esta siendo utilizado por otro proceso")
 """
 
 
@@ -251,6 +313,23 @@ def test_si_el_programa_del_erp_falla_no_se_calcula(pc):
     assert not pc.motor_llamado
 
 
+def test_si_el_programa_no_pudo_dejar_la_copia_en_bases_de_datos_no_se_calcula(pc):
+    """Ella tiene stock_frontera.xlsx abierto en Excel: el programa baja bien, la copia
+    a 'Bases de datos' falla y aun asi sale con 0. El motor leia la copia de ayer, que
+    pasa la guarda de frescura, publicaba y la ventana decia LISTO."""
+    robot = _robot(pc, 0)
+    (robot / "copia_falla.txt").write_text("1")
+
+    r = pc.correr("actualizar_plataforma.ps1", "-SinPausa")
+
+    assert r.returncode == 1
+    assert "Tablas del ERP listas" not in r.stdout
+    assert "no pudo dejar la copia en 'Bases de datos'" in r.stdout
+    assert "Copia local FALLO stock_frontera.xlsx" in r.stdout
+    assert "cierra los Excel de la carpeta 'Bases de datos'" in r.stdout
+    assert not pc.motor_llamado
+
+
 def test_sin_la_carpeta_del_programa_explica_que_hacer(pc):
     (pc.raiz / ".env").write_bytes(b"ROBOT_ERP_DIR=C:\\no\\existe\n")
 
@@ -272,6 +351,9 @@ def test_si_el_motor_falla_lo_dice_con_el_motivo(pc):
     assert "El sugerido NO se actualizó" in r.stdout
     assert "DESACTUALIZADO: stock_bodegas (4 dias habiles)" in r.stdout
     assert "ERROR: hay archivos desactualizados; no se publica." in r.stdout
+    # Dice si la tarea de las 09:30 lo va a reintentar (depende de la hora del test).
+    assert ("A las 09:30 se vuelve a intentar solo" in r.stdout
+            or "La tarea de las 09:30 ya pasó, así que hoy no se vuelve a intentar sola." in r.stdout)
 
 
 def test_el_acceso_deja_el_log_que_mira_la_tarea_de_las_0930(pc):
@@ -305,13 +387,59 @@ def test_el_acceso_suelta_su_candado_al_terminar(pc):
 
 
 def test_el_acceso_no_lanza_un_segundo_motor(pc):
-    pc.candado(os.getpid())
+    desde = pc.candado(os.getpid())
 
     r = pc.correr("actualizar_plataforma.ps1", "-SinRobot", "-SinPausa")
 
     assert r.returncode == 1
-    assert "El motor ya está calculando en este PC (desde 2026-10-19 09:30:05)" in r.stdout
+    assert f"El motor ya está calculando en este PC (desde {desde})" in r.stdout
     assert not pc.motor_llamado
+
+
+def test_el_acceso_no_corre_mientras_se_instala_una_version_nueva_del_motor(pc):
+    agente = _actualizando_motor(pc, 60)
+    try:
+        r = pc.correr("actualizar_plataforma.ps1", "-SinRobot", "-SinPausa")
+    finally:
+        agente.kill()
+
+    assert r.returncode == 1
+    assert "se está instalando una versión nueva del motor" in r.stdout
+    assert not pc.motor_llamado
+    assert not (pc.raiz / ".actualizar_plataforma.lock").exists()
+
+
+# El motor falso para correr el tarea_diaria.ps1 de verdad: escribe sin acomodar la
+# codificacion, como el motor real.
+_MOTOR_CON_TILDES = """\
+import sys
+print("  DESACTUALIZADO: stock_bodegas (lleg\\u00f3 vac\\u00edo)")
+print("ERROR: Un archivo lleg\\u00f3 vac\\u00edo o incompleto (respaldo del a\\u00f1o)")
+sys.exit(1)
+"""
+
+
+def test_el_acceso_y_el_log_muestran_las_tildes_del_motor(pc):
+    """Sin PYTHONIOENCODING, Python escribia en Windows-1252 y PowerShell lo leia en la
+    pagina de la consola: la ventana y el log decian 'lleg¾ vacÝo' y 'a±o'."""
+    shutil.copy2(SCRIPTS / "tarea_diaria.ps1", pc.raiz / "scripts" / "tarea_diaria.ps1")
+    api = pc.raiz / "apps" / "api"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(api / ".venv")],
+                   check=True, timeout=120)
+    (api / "src" / "jobs").mkdir(parents=True)
+    (api / "src" / "__init__.py").write_text("")
+    (api / "src" / "jobs" / "__init__.py").write_text("")
+    (api / "src" / "jobs" / "correr_motor_real.py").write_text(_MOTOR_CON_TILDES, encoding="utf-8")
+    # Como la tarea de Windows: sin las variables con que corren estas pruebas.
+    entorno = {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+
+    r = pc.correr("actualizar_plataforma.ps1", "-SinRobot", "-SinPausa", entorno=entorno)
+
+    assert r.returncode == 1
+    assert "ERROR: Un archivo llegó vacío o incompleto (respaldo del año)" in r.stdout
+    log = pc.log.read_text(encoding="utf-8-sig")
+    assert "DESACTUALIZADO: stock_bodegas (llegó vacío)" in log
+    assert "RESULTADO: FALLO (codigo 1)" in log
 
 
 # --- Codificacion de los scripts --------------------------------------------------
