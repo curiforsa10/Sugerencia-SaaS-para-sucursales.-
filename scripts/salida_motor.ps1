@@ -51,3 +51,20 @@ function Corrida-EnCurso($root) {
     if (-not $desde) { $desde = "hora desconocida" }
     return $desde
 }
+
+# Si el acceso "Actualizar plataforma" (actualizar_plataforma.ps1) esta corriendo en
+# este PC: la fecha en que empezo. $null si no. Mientras baja las tablas del ERP no
+# hay que lanzar el motor (leeria archivos a medio bajar y despues el acceso ya no
+# podria publicar los nuevos: "NO SE CORRE") ni cambiar el codigo. Mismo formato
+# de candado que el del motor, con el PID de esa ventana de PowerShell.
+function Actualizacion-EnCurso($root) {
+    $candado = Join-Path $root ".actualizar_plataforma.lock"
+    if (-not (Test-Path $candado)) { return $null }
+    $texto = "$(Get-Content $candado -Raw -ErrorAction SilentlyContinue)".Trim()
+    if ($texto -notmatch '^(\d+)\s*(.*)$') { return $null }
+    $desde = $matches[2].Trim()
+    $proceso = Get-Process -Id ([int]$matches[1]) -ErrorAction SilentlyContinue
+    if (-not $proceso -or $proceso.ProcessName -notlike "powershell*") { return $null }
+    if (-not $desde) { $desde = "hora desconocida" }
+    return $desde
+}

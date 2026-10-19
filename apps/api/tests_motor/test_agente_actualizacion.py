@@ -418,6 +418,33 @@ def test_con_otra_corrida_en_curso_no_se_lanza_una_segunda(pc, plataforma):
         "No se lanzó otra corrida: el motor ya está calculando en este PC (desde 2026-10-19 09:30:05)")
 
 
+def test_mientras_el_acceso_baja_las_tablas_no_se_recalcula_ni_se_actualiza(pc, plataforma):
+    """El acceso "Actualizar plataforma" publica apenas termine el programa del ERP:
+    un motor ahora leeria archivos a medio bajar, y cambiar el codigo a mitad
+    tampoco."""
+    ventana = subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
+                                "Start-Sleep -Seconds 120"])
+    try:
+        (pc.raiz / ".actualizar_plataforma.lock").write_text(
+            f"{ventana.pid} 2026-10-19 09:25:00", encoding="ascii")
+        antes = pc.sha()
+        pc.publicar("LEEME.txt", "version 2\n", "version 2")
+        sid = plataforma.pedir("recalcular")
+        pc.agente()
+        r = plataforma.reporte(sid)
+        assert r["ok"] is False
+        assert "se están bajando las tablas del ERP" in r["mensaje"]
+
+        sid = plataforma.pedir("actualizar_motor")
+        pc.agente()
+        r = plataforma.reporte(sid)
+        assert r["ok"] is False
+        assert "se están actualizando los datos" in r["mensaje"]
+        assert pc.sha() == antes
+    finally:
+        ventana.kill()
+
+
 def test_sin_solicitudes_no_hace_nada_y_un_tipo_desconocido_no_se_adivina(pc, plataforma):
     pc.agente()
     assert plataforma.reportes == []

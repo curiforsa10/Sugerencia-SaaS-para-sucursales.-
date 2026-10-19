@@ -140,6 +140,12 @@ function Actualizar-Motor {
         return @{ ok = $false; mensaje = "No se actualizó: el motor está calculando en este PC " +
             "(desde $enCurso). Vuelve a intentarlo cuando termine; tarda unos 30 minutos." }
     }
+    $acceso = Actualizacion-EnCurso $root
+    if ($acceso) {
+        return @{ ok = $false; mensaje = "No se actualizó: en este PC se están actualizando los datos " +
+            "con el acceso 'Actualizar plataforma' (desde $acceso). Vuelve a intentarlo cuando termine; " +
+            "tarda unos 45 minutos." }
+    }
     if (-not $gitExe) {
         return @{ ok = $false; mensaje = "No se actualizó: este PC no tiene Git instalado. " +
             "Hay que correr de nuevo el instalador (INSTALAR PLATAFORMA)." }
@@ -259,6 +265,14 @@ function Correr-Motor {
     # correctamente" sin haber hecho nada.
     $enCurso = Corrida-EnCurso $root
     if ($enCurso) { return (Ya-EnCurso $enCurso) }
+    # El acceso "Actualizar plataforma" esta bajando las tablas del ERP y publica
+    # apenas termine: un motor ahora leeria archivos a medio bajar.
+    $acceso = Actualizacion-EnCurso $root
+    if ($acceso) {
+        return @{ ok = $false; mensaje = "No se lanzó otra corrida: en este PC se están bajando las " +
+            "tablas del ERP con el acceso 'Actualizar plataforma' (desde $acceso), que publica el " +
+            "sugerido apenas termine. No hace falta volver a apretar el botón." }
+    }
     $venvPy = "$root\apps\api\.venv\Scripts\python.exe"
     if (-not (Test-Path $venvPy)) {
         return @{ ok = $false; mensaje = "Falta el entorno de Python en este PC. Hay que correr el instalador." }
