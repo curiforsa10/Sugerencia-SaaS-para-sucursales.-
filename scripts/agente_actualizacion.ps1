@@ -23,7 +23,10 @@
 # ============================================================
 param(
     # Muestra en pantalla lo que va haciendo. Sin esto solo escribe en el log.
-    [switch]$Verboso
+    [switch]$Verboso,
+    # Si el reporte a la plataforma falla, se reintenta despues de 1, 2 y 3 veces esto.
+    # Solo las pruebas lo cambian.
+    [int]$EsperaReporteSeg = 15
 )
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -38,8 +41,10 @@ $log = "$logDir\agente_$(Get-Date -Format 'yyyy-MM-dd').log"
 # muestra un error de algo que en realidad termino bien.
 #   - Una corrida del motor tarda 22 a 35 minutos (logs de octubre de 2026); la
 #     plataforma espera 75 antes de darla por perdida. El candado dura lo mismo.
+#   - Una actualizacion del motor tarda 1 a 3 minutos; la plataforma espera 15.
 #   - La tarea de Windows corta al agente a los 90 minutos (instalar_*.ps1).
 $CANDADO_MIN = 75
+$CANDADO_ACTUALIZAR_MIN = 15
 
 function Escribir($texto) {
     $linea = "[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $texto
@@ -75,15 +80,33 @@ if (-not $secreto) {
 # Una corrida del motor tarda ~30 min y la tarea despierta cada minuto: sin este candado
 # se lanzarian varios motores encima del mismo Excel. La tarea ademas esta configurada
 # como IgnorarNueva; el candado cubre el caso de ejecuciones a mano.
+# Lleva "<PID> <fecha> <tipo>": si el proceso que lo dejo ya no corre (se cerro la
+# sesion, se apago o se reinicio el PC), no frena. Antes solo se miraba la hora, y un
+# "Actualizar motor" cortado dejaba al PC ignorando todos los botones por una hora
+# mientras la web decia que estaba apagado. Lo leen tambien la tarea de las 09:30 y el
+# acceso "Actualizar plataforma" (ActualizacionMotor-EnCurso, en salida_motor.ps1).
 $candado = "$root\.agente.lock"
 if (Test-Path $candado) {
-    $desde = (Get-Item $candado).LastWriteTime
-    if ((Get-Date) - $desde -lt [TimeSpan]::FromMinutes($CANDADO_MIN)) {
+    $texto = "$(Get-Content $candado -Raw -ErrorAction SilentlyContinue)".Trim()
+    if ($texto -match '^(\d+)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s*(\S*)$') {
+        $idCandado = [int]$matches[1]
+        $fechaCandado = $matches[2]
+        $plazo = if ($matches[3] -eq "actualizar_motor") { $CANDADO_ACTUALIZAR_MIN } else { $CANDADO_MIN }
+        $desde = [datetime]::ParseExact($fechaCandado, "yyyy-MM-dd HH:mm:ss", [Globalization.CultureInfo]::InvariantCulture)
+        $vigente = (Proceso-DelCandado $idCandado $fechaCandado "powershell*") -and
+                   ((Get-Date) - $desde -lt [TimeSpan]::FromMinutes($plazo))
+    }
+    else {
+        # Sin PID: lo dejo un agente anterior a este cambio. Se mira solo la hora.
+        $desde = (Get-Item $candado).LastWriteTime
+        $vigente = (Get-Date) - $desde -lt [TimeSpan]::FromMinutes($CANDADO_MIN)
+    }
+    if ($vigente) {
         Escribir "Ya hay una corrida en curso (desde $($desde.ToString('HH:mm:ss'))). No hago nada."
         exit 0
     }
     # Candado viejo: quedo de una corrida que murio a medias (se apago el PC).
-    Escribir "Candado vencido de las $($desde.ToString('HH:mm:ss')): lo descarto."
+    Escribir "Candado de las $($desde.ToString('HH:mm:ss')) sin proceso vivo o vencido: lo descarto."
     Remove-Item $candado -Force
 }
 
@@ -103,11 +126,16 @@ $gitExe = Buscar-Git
 # Corre git en la raiz del repo. Devuelve @{ codigo; salida } con la salida como texto.
 # "Continue" a proposito: con "Stop", PowerShell 5.1 convierte en excepcion la primera
 # linea que un programa escribe en stderr, y git escribe ahi hasta el avance normal.
+# http.sslBackend=schannel: que git valide los certificados con el almacen de Windows.
+# La red de la empresa revisa las conexiones seguras con su propio certificado, que
+# esta en Windows pero no en el ca-bundle de OpenSSL: con un Git que use OpenSSL (el
+# de una instalacion anterior a la 2.48.1, o un MinGit de TI) el fetch fallaba con
+# "SSL certificate problem".
 function Correr-Git {
     $eap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $salida = & $gitExe -C $root @args 2>&1 | ForEach-Object { "$_" }
+        $salida = & $gitExe -c http.sslBackend=schannel -C $root @args 2>&1 | ForEach-Object { "$_" }
         # TrimEnd y no Trim: "git status --porcelain" parte con un espacio (" M archivo").
         return @{ codigo = $LASTEXITCODE; salida = (@($salida) -join "`n").TrimEnd() }
     }
@@ -183,6 +211,12 @@ function Actualizar-Motor {
     $env:LC_ALL = "C"
     Escribir "Bajando la version nueva de origin/$rama (hoy en $antes)..."
     $fetch = Correr-Git fetch --quiet origin $rama
+    if ($fetch.codigo -ne 0 -and $fetch.salida -match 'SSL certificate|certificate verify|self.signed certificate') {
+        Escribir "git fetch fallo por el certificado: $($fetch.salida)"
+        return @{ ok = $false; mensaje = "No se pudo bajar la versión nueva desde GitHub: Git no " +
+            "reconoce el certificado con que la red de la empresa revisa las conexiones seguras. " +
+            "No es falta de internet: avísale a TI (Git tiene que usar el almacén de certificados de Windows)." }
+    }
     if ($fetch.codigo -ne 0) {
         return @{ ok = $false; mensaje = "No se pudo bajar la versión nueva desde GitHub: " +
             "$(Primera-Linea $fetch.salida). Revisa que este PC tenga internet y vuelve a intentarlo." }
@@ -282,6 +316,7 @@ function Correr-Motor {
     $env:PYTHONIOENCODING = "utf-8"
     try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 
+    $inicio = Get-Date
     Push-Location "$root\apps\api"
     $eap = $ErrorActionPreference
     # "Continue" como en tarea_diaria.ps1: con "Stop" la primera linea que el motor
@@ -303,17 +338,31 @@ function Correr-Motor {
 
     $titular = if ($codigo -eq 0) { Titular-SiNoPublico $salida } else { $null }
     if ($titular) {
-        # Este PC ya no es el titular de Fuentes de datos: el motor sale con 0 a
+        # Este PC no es el titular de Fuentes de datos: el motor sale con 0 a
         # proposito (no es una falla), pero no calculo ni publico. La tarjeta no
-        # puede quedar en OK. Pasa si el PC que dejo de ser titular conserva la
-        # tarea del agente: los dos compiten por cada clic (ver data/crudos/README.md).
-        return @{ ok = $false; mensaje = "No se publicó nada: la solicitud la tomó un PC que ya no es el titular " +
-                   "(el titular es $titular). Vuelve a apretar el botón; si se repite, avísale a un admin." }
+        # puede quedar en OK. Pasa con el PC nuevo antes del dia del cambio (es el
+        # unico agente: volver a apretar da lo mismo) y con el PC que dejo de ser
+        # titular si conserva la tarea del agente (ver data/crudos/README.md).
+        return @{ ok = $false; mensaje = "No se publicó nada: este pedido lo tomó $env:COMPUTERNAME, que no es " +
+                   "el PC titular (el titular es $titular). Mientras sea así, 'Actualizar ahora' no puede " +
+                   "publicar: cambia el titular en Fuentes de datos o avísale a un admin." }
     }
     if ($codigo -eq 0 -and ($salida | Select-String -Pattern '^NO SE CORRE:' -Quiet)) {
         # La otra corrida partio entre la pregunta de arriba y el arranque del motor.
         return (Ya-EnCurso $null)
     }
+    # El motor corrio de verdad: queda como la corrida del dia, igual que la de
+    # tarea_diaria.ps1. La tarea de las 09:30 y la de al iniciar sesion
+    # (tarea_si_no_corrio_hoy.ps1) miran la linea RESULTADO de ese log: sin esto, un
+    # "Actualizar ahora" de las 08:45 que publico no contaba, y a las 09:30 se volvia
+    # a calcular lo mismo (30 minutos mas, con los botones ocupados).
+    $logMotor = "$logDir\motor_$($inicio.ToString('yyyy-MM-dd')).log"
+    $resultado = if ($codigo -eq 0) { "RESULTADO: OK (agente)" } else { "RESULTADO: FALLO (codigo $codigo, agente)" }
+    try {
+        @("=== $($inicio.ToString('yyyy-MM-dd HH:mm:ss')) (agente: Actualizar ahora) ===") + @($salida) + @($resultado) |
+            Out-File $logMotor -Append -Encoding utf8
+    }
+    catch { Escribir "No pude anotar la corrida en $logMotor : $($_.Exception.Message)" }
     if ($codigo -eq 0) {
         # El mensaje va tal cual a la tarjeta de la web, asi que se arma en lenguaje
         # de usuario a partir de lo que el motor imprimio.
@@ -330,6 +379,47 @@ function Correr-Motor {
     if ($mensaje.Length -gt 400) { $mensaje = $mensaje.Substring(0, 400) + "…" }
     if (-not $mensaje) { $mensaje = "El motor terminó con error (código $codigo)." }
     return @{ ok = $false; mensaje = $mensaje }
+}
+
+# --- Reporte a la plataforma -----------------------------------------------------
+# POST /terminar con el cuerpo ya armado (JSON). Devuelve @{ estado; detalle }:
+#   ok         la plataforma lo recibio;
+#   descartar  lo rechazo con un 4xx (404: la solicitud ya no existe): repetirlo da lo
+#              mismo, y guardarlo dejaria al agente reenviandolo para siempre;
+#   fallo      no se pudo hablar con ella (sin red, o un 502/503 mientras Render se
+#              reinicia despues de la carga): vale la pena reintentar.
+function Enviar-Reporte($json) {
+    try {
+        # En bytes UTF-8: con el texto tal cual, PowerShell 5.1 lo manda en ISO-8859-1 y
+        # la plataforma rechaza el cuerpo apenas el mensaje trae una tilde.
+        Invoke-RestMethod -Uri "$apiUrl/api/actualizacion/terminar" -Headers $cabeceras -Method Post `
+            -ContentType "application/json; charset=utf-8" `
+            -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec 60 | Out-Null
+        return @{ estado = "ok"; detalle = "" }
+    }
+    catch {
+        $http = 0
+        try { $http = [int]$_.Exception.Response.StatusCode } catch { }
+        if ($http -ge 400 -and $http -lt 500) { return @{ estado = "descartar"; detalle = "HTTP $http" } }
+        return @{ estado = "fallo"; detalle = $_.Exception.Message }
+    }
+}
+
+# El reporte que no se pudo mandar en una pasada anterior. Se manda antes de mirar si hay
+# algo nuevo: si no, la tarjeta de la web quedaba girando hasta el plazo (75 minutos) y
+# despues decia error aunque el motor hubiera publicado.
+$reportePendiente = "$logDir\.reporte_pendiente.json"
+if (Test-Path $reportePendiente) {
+    $json = [IO.File]::ReadAllText($reportePendiente, [Text.Encoding]::UTF8)
+    $envio = Enviar-Reporte $json
+    if ($envio.estado -eq "fallo") {
+        Escribir "Sigo sin poder mandar el reporte pendiente: $($envio.detalle)"
+    }
+    else {
+        Remove-Item $reportePendiente -Force -ErrorAction SilentlyContinue
+        if ($envio.estado -eq "ok") { Escribir "Reporte pendiente enviado: $json" }
+        else { Escribir "La plataforma rechazo el reporte pendiente ($($envio.detalle)); lo descarto: $json" }
+    }
 }
 
 # --- 1) Hay algo pendiente? ---
@@ -354,7 +444,8 @@ $idSolicitud = $pendiente.id
 $tipo = "$($pendiente.tipo)"
 if (-not $tipo) { $tipo = "recalcular" }
 Escribir "Solicitud $idSolicitud ($tipo) tomada (la pidio $($pendiente.solicitado_por))."
-New-Item -ItemType File -Path $candado -Force | Out-Null
+Set-Content -Path $candado -Encoding ascii -Value (
+    "$PID $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $($tipo -replace '[^A-Za-z0-9_]', '_')")
 
 # --- 2) Hacer lo pedido ---
 $ok = $false
@@ -383,19 +474,35 @@ finally {
 }
 
 # --- 3) Reportar el resultado a la plataforma ---
-try {
-    $cuerpo = @{ id = $idSolicitud; ok = $ok; mensaje = $mensaje; version = (Version-Motor) } |
-              ConvertTo-Json -Compress
-    # En bytes UTF-8: con el texto tal cual, PowerShell 5.1 lo manda en ISO-8859-1 y la
-    # plataforma rechaza el cuerpo apenas el mensaje trae una tilde.
-    Invoke-RestMethod -Uri "$apiUrl/api/actualizacion/terminar" -Headers $cabeceras -Method Post `
-        -ContentType "application/json; charset=utf-8" `
-        -Body ([Text.Encoding]::UTF8.GetBytes($cuerpo)) -TimeoutSec 60 | Out-Null
+# Justo al final de una carga pesada Render puede estar reiniciandose (502/503 el 29-09,
+# el 30-09 y el 02-10): se reintenta como la carga del motor, y si igual no se puede, el
+# reporte queda guardado y sale en la pasada siguiente. Sin esto la tarjeta quedaba
+# girando hasta el plazo y despues decia error aunque el motor hubiera publicado.
+$cuerpo = @{ id = $idSolicitud; ok = $ok; mensaje = $mensaje; version = (Version-Motor) } |
+          ConvertTo-Json -Compress
+$esperas = @(1, 2, 3) | ForEach-Object { $_ * $EsperaReporteSeg }
+$intento = 0
+while ($true) {
+    $envio = Enviar-Reporte $cuerpo
+    if ($envio.estado -ne "fallo" -or $intento -ge $esperas.Count) { break }
+    Escribir "No pude reportar el resultado ($($envio.detalle)): reintento en $($esperas[$intento]) s."
+    Start-Sleep -Seconds $esperas[$intento]
+    $intento++
+}
+if ($envio.estado -eq "ok") {
     Escribir "Reportado: ok=$ok - $mensaje"
 }
-catch {
-    # Si no se puede avisar, la solicitud queda "en curso" y la plataforma la cierra
-    # sola con un aviso (75 minutos si era recalcular, 15 si era actualizar el motor).
-    # Peor seria dejarla girando para siempre.
-    Escribir "No pude reportar el resultado: $($_.Exception.Message)"
+elseif ($envio.estado -eq "descartar") {
+    Escribir "La plataforma rechazo el reporte ($($envio.detalle)): ok=$ok - $mensaje"
+}
+else {
+    try {
+        [IO.File]::WriteAllText($reportePendiente, $cuerpo, (New-Object Text.UTF8Encoding $false))
+        Escribir "No pude reportar el resultado ($($envio.detalle)): queda guardado y lo mando en la proxima pasada. ok=$ok - $mensaje"
+    }
+    catch {
+        # Ni siquiera se pudo guardar: la plataforma la cierra sola con un aviso al
+        # cumplirse el plazo (75 minutos si era recalcular, 15 si era actualizar el motor).
+        Escribir "No pude reportar el resultado ni guardarlo: $($envio.detalle) / $($_.Exception.Message)"
+    }
 }

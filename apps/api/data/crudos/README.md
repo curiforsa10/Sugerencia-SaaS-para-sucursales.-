@@ -98,15 +98,17 @@ Disable-ScheduledTask -TaskName "Sugerido Curifor - Agente"   # si existe
 ```
 
 En el PC de la jefa la tarea de las 09:30 no corre el motor directo sino
-`scripts/tarea_si_no_corrio_hoy.ps1`: si ese día ya se usó el acceso "Actualizar
-plataforma" (deja la línea RESULTADO en el log del día), no calcula de nuevo, y si el
-acceso está bajando las tablas, espera a que termine.
+`scripts/tarea_si_no_corrio_hoy.ps1`: si ese día ya hubo una corrida que salió bien
+(el acceso "Actualizar plataforma" y el botón "Actualizar ahora" dejan la línea
+RESULTADO en el log del día), no calcula de nuevo; si la última falló, la vuelve a
+intentar. Si el acceso está bajando las tablas espera a que termine, y si el agente
+está instalando una versión nueva del motor ("Actualizar motor"), también.
 
 La guarda de titular igual impide que ese PC publique, pero sus tareas siguen
 corriendo. Si los dos PCs tienen el agente, compiten por cada clic del botón: si
-gana el que ya no es titular, no publica nada y la web dice "No se publicó nada: la
-solicitud la tomó un PC que ya no es el titular". La tarea de vigentes Ford lo
-anota en su log.
+gana el que no es titular, no publica nada y la web dice "No se publicó nada: este
+pedido lo tomó <PC>, que no es el PC titular". La tarea de vigentes Ford lo anota en
+su log.
 
 ## Comandos
 

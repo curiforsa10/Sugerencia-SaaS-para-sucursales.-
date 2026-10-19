@@ -20,6 +20,7 @@ Cada corrida del agente lanza PowerShell y unas diez llamadas a git: en un PC co
 antivirus son 10 a 20 segundos. Por eso los casos van agrupados y el repositorio y el
 entorno de Python se arman una sola vez y se copian.
 """
+import datetime as dt
 import json
 import os
 import pathlib
@@ -52,6 +53,9 @@ class _Plataforma:
     def __init__(self):
         self.cola: list[dict] = []
         self.reportes: list[dict] = []
+        # /terminar responde 503 estas veces antes de recibir (Render reiniciandose).
+        self.terminar_caida = 0
+        self.intentos_terminar = 0
         plataforma = self
 
         class H(BaseHTTPRequestHandler):
@@ -79,11 +83,17 @@ class _Plataforma:
                 crudo = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 if self.headers.get("X-Agente-Secret") != SECRETO:
                     return self._json(403, {"detail": "No autorizado"})
+                plataforma.intentos_terminar += 1
+                if plataforma.terminar_caida > 0:
+                    plataforma.terminar_caida -= 1
+                    return self._json(503, {"detail": "Service Unavailable"})
                 try:
                     datos = json.loads(crudo.decode("utf-8"))  # como FastAPI: UTF-8 o nada
                 except (UnicodeDecodeError, ValueError):
                     plataforma.reportes.append({"invalido": crudo.hex()})
                     return self._json(422, {"detail": "There was an error parsing the body"})
+                if str(datos.get("id", "")).startswith("borrada-"):
+                    return self._json(404, {"detail": "Solicitud no encontrada"})
                 plataforma.reportes.append(datos)
                 return self._json(200, {"id": datos.get("id"), "estado": "ok"})
 
@@ -117,6 +127,8 @@ def _servidor():
 def plataforma(_servidor):
     _servidor.cola.clear()
     _servidor.reportes.clear()
+    _servidor.terminar_caida = 0
+    _servidor.intentos_terminar = 0
     return _servidor
 
 
@@ -138,9 +150,14 @@ def _git(cwd, *args) -> str:
 
 # Un pip falso: anota con que lo llamaron y falla si el agente le pasa PIP_FALSO_FALLA
 # (el agente hereda el entorno del test). El de verdad tarda 40 s en instalarse aca.
+# Anota tambien el candado del agente tal como esta mientras reinstala.
 _PIP_FALSO = """\
 import os, sys, pathlib
 pathlib.Path(os.environ["PIP_FALSO_ANOTA"]).write_text(" ".join(sys.argv[1:]))
+if os.environ.get("PIP_FALSO_CANDADO"):
+    candado = pathlib.Path(os.environ["PIP_FALSO_CANDADO"])
+    pathlib.Path(os.environ["PIP_FALSO_ANOTA"] + ".candado").write_text(
+        candado.read_text() if candado.exists() else "(sin candado)")
 if os.environ.get("PIP_FALSO_FALLA"):
     print("ERROR: No matching distribution found for polars==9.9.9")
     sys.exit(1)
@@ -219,21 +236,33 @@ class _Pc:
             (jobs / "__init__.py").write_text("")
             (jobs / "correr_motor_real.py").write_text(motor, encoding="utf-8")
 
-    def candado_del_motor(self, pid: int):
+    def candado_del_motor(self, pid: int) -> str:
+        """Con la fecha de ahora: un candado se escribe despues de que parte su proceso
+        (con una fecha anterior, parece de un PID reciclado)."""
+        desde = _ahora()
         data = self.raiz / "apps" / "api" / "data"
         data.mkdir(parents=True, exist_ok=True)
-        (data / "motor.lock").write_text(f"{pid} 2026-10-19 09:30:05", encoding="utf-8")
+        (data / "motor.lock").write_text(f"{pid} {desde}", encoding="utf-8")
+        return desde
 
-    def agente(self, **entorno) -> subprocess.CompletedProcess:
+    def agente(self, *args, **entorno) -> subprocess.CompletedProcess:
         r = subprocess.run(
             [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-             "-File", str(self.raiz / "scripts" / "agente_actualizacion.ps1"), "-Verboso"],
+             "-File", str(self.raiz / "scripts" / "agente_actualizacion.ps1"), "-Verboso", *args],
             capture_output=True, text=True, timeout=180, env={**self.entorno, **entorno})
         assert r.returncode == 0, r.stdout + r.stderr
         return r
 
     def log(self) -> str:
         return next((self.raiz / "logs").glob("agente_*.log")).read_text(encoding="utf-8-sig")
+
+    @property
+    def log_motor(self) -> pathlib.Path:
+        return self.raiz / "logs" / f"motor_{dt.date.today():%Y-%m-%d}.log"
+
+
+def _ahora(minutos: int = 0) -> str:
+    return (dt.datetime.now() + dt.timedelta(minutes=minutos)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 @pytest.fixture
@@ -275,14 +304,14 @@ def test_con_una_corrida_en_curso_no_se_actualiza(pc, plataforma):
     el de un proceso Python vivo, igual que una corrida de verdad."""
     antes = pc.sha()
     pc.publicar("LEEME.txt", "version 2\n", "version 2")
-    pc.candado_del_motor(os.getpid())
+    desde = pc.candado_del_motor(os.getpid())
     sid = plataforma.pedir("actualizar_motor")
 
     pc.agente()
 
     r = plataforma.reporte(sid)
     assert r["ok"] is False
-    assert "está calculando" in r["mensaje"] and "2026-10-19 09:30:05" in r["mensaje"]
+    assert "está calculando" in r["mensaje"] and desde in r["mensaje"]
     assert pc.sha() == antes
 
 
@@ -338,7 +367,7 @@ def test_si_cambiaron_las_librerias_se_reinstalan(pc, plataforma):
     nueva = pc.publicar("apps/api/requirements-motor.txt", "httpx==0.28.2\n", "sube httpx")
     sid = plataforma.pedir("actualizar_motor")
 
-    pc.agente()
+    pc.agente(PIP_FALSO_CANDADO=str(pc.raiz / ".agente.lock"))
 
     r = plataforma.reporte(sid)
     assert r["ok"] is True, r
@@ -346,6 +375,27 @@ def test_si_cambiaron_las_librerias_se_reinstalan(pc, plataforma):
     assert pc.sha() == nueva
     llamado = pc.pip_llamado.read_text()
     assert llamado.startswith("install ") and llamado.endswith("requirements-motor.txt")
+    # Mientras reinstala, su candado dice quien es y que hace: la tarea de las 09:30 y
+    # el acceso "Actualizar plataforma" esperan (ActualizacionMotor-EnCurso).
+    candado = pathlib.Path(str(pc.pip_llamado) + ".candado").read_text().strip()
+    assert re.fullmatch(r"\d+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d actualizar_motor", candado), candado
+    assert not (pc.raiz / ".agente.lock").exists(), "lo suelta al terminar"
+
+
+def test_actualizar_motor_baja_de_github_con_los_certificados_de_windows(pc, plataforma, tmp_path):
+    """La red de la empresa revisa las conexiones seguras con un certificado que Windows
+    conoce y el ca-bundle de OpenSSL no: con un Git que use OpenSSL, el fetch fallaba con
+    'SSL certificate problem' y el mensaje pedia revisar internet."""
+    pc.publicar("LEEME.txt", "version 2\n", "version 2")
+    traza = tmp_path / "git_trace2.txt"
+    sid = plataforma.pedir("actualizar_motor")
+
+    pc.agente(GIT_TRACE2=str(traza))
+
+    assert plataforma.reporte(sid)["ok"] is True
+    inicios = [l for l in traza.read_text(encoding="utf-8", errors="replace").splitlines()
+               if " start " in l and " fetch " in l]
+    assert inicios and all("-c http.sslBackend=schannel" in l for l in inicios), inicios
 
 
 def test_si_las_librerias_no_se_instalan_vuelve_a_la_version_anterior(pc, plataforma):
@@ -392,6 +442,11 @@ def test_actualizar_ahora_sin_tipo_corre_el_motor_aunque_avise_por_stderr(pc, pl
     assert "UserWarning: Workbook contains no default style" in log
     # El .env sin BOM se leyo como UTF-8: el motor recibe la ruta con su tilde.
     assert "MOTOR_STOCK_DIR=C:\\OneDrive\\Abastecimiento y Logística-Data BI - Datos" in log
+    # Cuenta como la corrida del dia: la tarea de las 09:30 (tarea_si_no_corrio_hoy.ps1)
+    # mira la ultima linea RESULTADO de este log y no calcula otra vez lo mismo.
+    motor = pc.log_motor.read_text(encoding="utf-8-sig").splitlines()
+    assert "CARGA OFICIAL: 18254 filas." in motor
+    assert motor[-1] == "RESULTADO: OK (agente)"
 
 
 def test_el_error_del_motor_llega_con_sus_tildes(pc, plataforma):
@@ -404,10 +459,31 @@ def test_el_error_del_motor_llega_con_sus_tildes(pc, plataforma):
     r = plataforma.reporte(sid)
     assert r["ok"] is False
     assert r["mensaje"] == "ERROR: No se encontró archivo para la fuente stock_bodegas"
+    # Una corrida que fallo tambien queda: la tarea de las 09:30 la reintenta.
+    motor = pc.log_motor.read_text(encoding="utf-8-sig").splitlines()
+    assert "ERROR: No se encontró archivo para la fuente stock_bodegas" in motor
+    assert motor[-1] == "RESULTADO: FALLO (codigo 1, agente)"
+
+
+def test_en_un_pc_que_no_es_el_titular_no_pide_volver_a_apretar(pc, plataforma):
+    """El PC nuevo ya tiene el agente, pero el titular sigue siendo el anterior: es el
+    unico agente, asi que volver a apretar daria siempre lo mismo."""
+    pc.venv(motor="print('NO SE PUBLICA: este PC no es el titular (Notebook anterior)')\n")
+    sid = plataforma.pedir("recalcular")
+
+    pc.agente()
+
+    r = plataforma.reporte(sid)
+    assert r["ok"] is False
+    assert r["mensaje"] == (
+        f"No se publicó nada: este pedido lo tomó {os.environ['COMPUTERNAME']}, que no es el PC "
+        "titular (el titular es Notebook anterior). Mientras sea así, 'Actualizar ahora' no puede "
+        "publicar: cambia el titular en Fuentes de datos o avísale a un admin.")
+    assert not pc.log_motor.exists(), "no calculo: no cuenta como la corrida del dia"
 
 
 def test_con_otra_corrida_en_curso_no_se_lanza_una_segunda(pc, plataforma):
-    pc.candado_del_motor(os.getpid())
+    desde = pc.candado_del_motor(os.getpid())
     sid = plataforma.pedir("recalcular")
 
     pc.agente()
@@ -415,7 +491,86 @@ def test_con_otra_corrida_en_curso_no_se_lanza_una_segunda(pc, plataforma):
     r = plataforma.reporte(sid)
     assert r["ok"] is False
     assert r["mensaje"].startswith(
-        "No se lanzó otra corrida: el motor ya está calculando en este PC (desde 2026-10-19 09:30:05)")
+        f"No se lanzó otra corrida: el motor ya está calculando en este PC (desde {desde})")
+    assert not pc.log_motor.exists()
+
+
+# --- Reporte a la plataforma --------------------------------------------------------
+
+
+def test_si_la_plataforma_se_reinicia_al_final_el_reporte_se_reintenta(pc, plataforma):
+    """El motor publico y Render se reinicia justo despues de la carga pesada (502/503
+    el 29-09, el 30-09 y el 02-10). Con un solo intento la tarjeta quedaba girando hasta
+    el plazo y despues decia error aunque se habia publicado."""
+    pc.venv(motor=MOTOR_FALSO)
+    plataforma.terminar_caida = 2
+    sid = plataforma.pedir("recalcular")
+
+    pc.agente("-EsperaReporteSeg", "0")
+
+    assert plataforma.intentos_terminar == 3
+    assert plataforma.reporte(sid)["mensaje"] == "Se publicaron 18254 filas."
+    assert not (pc.raiz / "logs" / ".reporte_pendiente.json").exists()
+
+
+def test_si_no_se_pudo_reportar_se_manda_en_la_pasada_siguiente(pc, plataforma):
+    pc.venv(motor=MOTOR_FALSO)
+    plataforma.terminar_caida = 4
+    sid = plataforma.pedir("recalcular")
+
+    pc.agente("-EsperaReporteSeg", "0")
+
+    assert plataforma.intentos_terminar == 4 and plataforma.reportes == []
+    pendiente = pc.raiz / "logs" / ".reporte_pendiente.json"
+    assert json.loads(pendiente.read_text(encoding="utf-8"))["id"] == sid
+
+    pc.agente("-EsperaReporteSeg", "0")  # la plataforma ya responde; no hay nada nuevo
+
+    r = plataforma.reporte(sid)
+    assert (r["ok"], r["mensaje"]) == (True, "Se publicaron 18254 filas.")
+    assert not pendiente.exists()
+
+    # Uno que la plataforma ya no tiene (404) no se reenvia para siempre.
+    pendiente.write_text(json.dumps({"id": "borrada-1", "ok": True, "mensaje": "x"}), encoding="utf-8")
+    pc.agente()
+    assert not pendiente.exists()
+    assert "rechazo el reporte pendiente (HTTP 404)" in pc.log()
+
+
+# --- Candado del agente -------------------------------------------------------------
+
+
+def test_un_candado_de_un_agente_que_se_corto_no_deja_al_pc_sordo(pc, plataforma):
+    """Se cerro la sesion (o se reinicio el PC) en medio de un "Actualizar motor". Antes
+    el candado se respetaba 75 minutos solo por su hora: el PC ignoraba todos los botones
+    y la web decia que estaba apagado."""
+    muerto = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                            capture_output=True, text=True, check=True)
+    (pc.raiz / ".agente.lock").write_text(f"{int(muerto.stdout)} {_ahora(-2)} actualizar_motor",
+                                          encoding="ascii")
+    sid = plataforma.pedir("actualizar_motor")
+
+    pc.agente()
+
+    assert plataforma.reporte(sid)["mensaje"].startswith("El motor ya estaba al día")
+
+
+def test_con_otro_agente_trabajando_no_toma_la_solicitud(pc, plataforma):
+    otro = subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 120"])
+    try:
+        (pc.raiz / ".agente.lock").write_text(f"{otro.pid} {_ahora()} recalcular", encoding="ascii")
+        plataforma.pedir("recalcular")
+        pc.agente()
+    finally:
+        otro.kill()
+
+    assert plataforma.reportes == [] and len(plataforma.cola) == 1
+    assert "Ya hay una corrida en curso" in pc.log()
+
+    # El de un agente anterior (sin PID) se respeta por la hora, como antes.
+    (pc.raiz / ".agente.lock").write_text("", encoding="ascii")
+    pc.agente()
+    assert plataforma.reportes == [] and len(plataforma.cola) == 1
 
 
 def test_mientras_el_acceso_baja_las_tablas_no_se_recalcula_ni_se_actualiza(pc, plataforma):
@@ -425,8 +580,7 @@ def test_mientras_el_acceso_baja_las_tablas_no_se_recalcula_ni_se_actualiza(pc, 
     ventana = subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
                                 "Start-Sleep -Seconds 120"])
     try:
-        (pc.raiz / ".actualizar_plataforma.lock").write_text(
-            f"{ventana.pid} 2026-10-19 09:25:00", encoding="ascii")
+        (pc.raiz / ".actualizar_plataforma.lock").write_text(f"{ventana.pid} {_ahora()}", encoding="ascii")
         antes = pc.sha()
         pc.publicar("LEEME.txt", "version 2\n", "version 2")
         sid = plataforma.pedir("recalcular")
