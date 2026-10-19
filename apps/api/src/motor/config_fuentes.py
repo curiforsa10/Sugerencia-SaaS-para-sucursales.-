@@ -33,6 +33,7 @@ sugerido y las altas de la lista de precios siguen leyendo el mismo archivo.
 
     python -m src.motor.config_fuentes --probar             # que elige cada lado
     python -m src.motor.config_fuentes --probar --reportar  # y lo manda al panel
+    python -m src.motor.config_fuentes --guardar-config     # la deja guardada en este PC
 
 No usa el registro de Windows ni Microsoft Graph (ver docs/adr/0004).
 """
@@ -2089,11 +2090,32 @@ def main(argv=None) -> int:
                          "No calcula ni publica.")
     ap.add_argument("--reportar", action="store_true",
                     help="Con --probar: manda el resultado al panel de Fuentes de datos.")
+    ap.add_argument("--guardar-config", action="store_true",
+                    help="Trae la configuracion de la plataforma y la deja guardada en este PC. "
+                         "Sale con 1 si este PC queda sin ninguna (ni de la plataforma ni guardada).")
     args = ap.parse_args(argv)
+    if args.guardar_config:
+        return guardar_config()
     if not args.probar:
         ap.print_help()
         return 2
     return probar(reportar=args.reportar)
+
+
+def guardar_config() -> int:
+    """La usa el instalador del PC nuevo (scripts/instalar_pc_jefa.ps1) despues de
+    `--probar`, que no guarda nada. Sin configuracion guardada, si en su primera
+    corrida la plataforma no respondia, `es_titular(None)` daba True: el PC nuevo se
+    creia titular y publicaba a la misma hora que el de verdad, con sus archivos."""
+    cfg, origen, avisos, _ = cargar_configuracion(guardar_cache=True)
+    for a in avisos:
+        print(f"  {a}")
+    if cfg is None:
+        print("Este PC no tiene configuracion de fuentes (ni de la plataforma ni guardada).")
+        return 1
+    print(f"Configuracion de fuentes en este PC ({origen}): modo {cfg.modo}, "
+          f"titular {cfg.alias(cfg.pc_titular) or '(sin titular)'}.")
+    return 0
 
 
 if __name__ == "__main__":

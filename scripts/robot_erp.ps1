@@ -25,12 +25,15 @@ function Es-CarpetaRobot($dir) {
     return [bool]($dir -and (Test-Path (Join-Path $dir "flexline_flows.py")))
 }
 
-# Las carpetas donde suele quedar el programa, que existan y lo tengan.
+# Las carpetas donde suele quedar el programa, que existan y lo tengan. La primera es
+# adonde lo copia el instalador cuando lo encuentra dentro de OneDrive. Si se agrega una,
+# va también en Carpetas-KitRobot de instalar_pc_jefa.ps1.
 function Carpetas-RobotProbables {
     $escritorio = [Environment]::GetFolderPath("Desktop")
     $documentos = [Environment]::GetFolderPath("MyDocuments")
     $od = $env:OneDriveCommercial
     $candidatas = @(
+        "$env:USERPROFILE\automatizacion",
         "$escritorio\INSTALAR_EN_PC_JEFA\automatizacion",
         "$escritorio\automatizacion",
         "$documentos\automatizacion",

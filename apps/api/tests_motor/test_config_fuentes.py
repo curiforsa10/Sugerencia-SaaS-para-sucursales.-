@@ -1106,3 +1106,41 @@ def test_probar_reportar_reenvia_lo_que_quedo_pendiente(arbol, plataforma):
 
     assert [r["id"] for r in plataforma.reportes][0] == ayer and len(plataforma.reportes) == 2
     assert not list(cf.PENDIENTES_DIR.glob("*.json"))
+
+
+# --- CLI --guardar-config -----------------------------------------------------------
+
+
+def test_sin_configuracion_guardada_un_pc_nuevo_se_cree_titular(arbol, plataforma):
+    """Por que existe --guardar-config: --probar (lo unico que corria el instalador) no
+    guarda nada, y si en la primera corrida del PC nuevo la plataforma no responde, no
+    hay de donde saber quien es el titular."""
+    plataforma.error = RuntimeError("502 Bad Gateway")
+
+    cfg, origen, _, _ = cf.cargar_configuracion()
+
+    assert (cfg, origen) == (None, "env")
+    assert cf.es_titular(cfg, "PC-JEFA") is True
+
+
+def test_guardar_config_deja_la_configuracion_y_el_pc_nuevo_ya_no_se_cree_titular(arbol, plataforma, capsys):
+    plataforma.config = semilla("prueba", pc_titular="PC-ANTERIOR")
+
+    assert cf.main(["--guardar-config"]) == 0
+
+    assert "modo prueba, titular PC-ANTERIOR" in capsys.readouterr().out
+    assert json.loads(cf.CACHE.read_text(encoding="utf-8"))["config"]["pc_titular"] == "PC-ANTERIOR"
+    # Al dia siguiente, a las 09:30, la plataforma no responde: manda lo guardado.
+    plataforma.error = RuntimeError("502 Bad Gateway")
+    cfg, origen, _, _ = cf.cargar_configuracion()
+    assert origen == "cache"
+    assert cf.es_titular(cfg, "PC-JEFA") is False
+
+
+def test_guardar_config_sin_plataforma_ni_nada_guardado_sale_con_1(arbol, plataforma, capsys):
+    plataforma.error = RuntimeError("ConnectError")
+
+    assert cf.main(["--guardar-config"]) == 1
+
+    assert "Este PC no tiene configuracion de fuentes" in capsys.readouterr().out
+    assert not cf.CACHE.exists()

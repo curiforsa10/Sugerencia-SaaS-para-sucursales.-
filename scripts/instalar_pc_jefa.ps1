@@ -26,6 +26,11 @@ param(
     [switch]$Simular,
     # Con -Simular: no crea las carpetas de OneDrive de prueba, para ver los avisos.
     [switch]$SimularSinCarpetas,
+    # Con -Simular: el programa del ERP de prueba queda dentro del OneDrive de prueba
+    # (como el kit en un Escritorio que OneDrive respalda), para ver cómo se saca de ahí.
+    [switch]$SimularRobotEnOneDrive,
+    # Con -Simular: sin programa del ERP, para ver el resumen sin él.
+    [switch]$SimularSinRobot,
     # Con -Simular: dónde (por defecto %TEMP%\simulacion-instalador). Si ya existe, se
     # comporta como una reinstalación.
     [string]$CarpetaSimulacion,
@@ -99,6 +104,46 @@ function Refrescar-Path {
                 [Environment]::GetEnvironmentVariable("Path", "User")
 }
 
+# Si una ruta queda dentro de una carpeta (o es ella misma).
+function Dentro-De($ruta, $carpeta) {
+    if (-not $ruta -or -not $carpeta) { return $false }
+    return ("$ruta".TrimEnd("\") + "\").StartsWith("$carpeta".TrimEnd("\") + "\", [StringComparison]::OrdinalIgnoreCase)
+}
+
+# Si una ruta queda dentro de OneDrive (cualquiera de sus raíces).
+function Dentro-DeOneDrive($ruta) {
+    foreach ($raiz in @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer, $od) | Where-Object { $_ }) {
+        if (Dentro-De $ruta $raiz) { return $true }
+    }
+    return $false
+}
+
+# Las carpetas donde suele quedar el programa del ERP: las de Carpetas-RobotProbables
+# (robot_erp.ps1), copiadas acá porque ese archivo se carga recién en el paso 2 (este
+# instalador puede estar corriendo suelto, bajado de GitHub), más la carpeta fuera de
+# OneDrive adonde lo copia el paso 5.
+function Carpetas-KitRobot {
+    $c = @(
+        "$perfil\automatizacion",
+        "$escritorio\INSTALAR_EN_PC_JEFA\automatizacion",
+        "$escritorio\automatizacion",
+        "$documentos\automatizacion",
+        "$perfil\Desktop\INSTALAR_EN_PC_JEFA\automatizacion",
+        "$perfil\Documents\automatizacion"
+    )
+    if ($od) {
+        $c += @(
+            "$od\Documentos\Desarrollos\Automatizaciones\3. Actualizacion\automatizacion",
+            "$od\Escritorio\INSTALAR_EN_PC_JEFA\automatizacion",
+            "$od\Documentos\automatizacion"
+        )
+    }
+    return $c
+}
+
+# Las palabras con que git avisa que no reconoce el certificado de la red.
+$ERROR_CERTIFICADO = 'SSL certificate|certificate verify|self.signed certificate'
+
 # ------------------------------------------------------------- Dónde se instala
 if ($Simular) {
     if (-not $CarpetaSimulacion) { $CarpetaSimulacion = Join-Path $env:TEMP "simulacion-instalador" }
@@ -108,6 +153,7 @@ if ($Simular) {
     $perfil = Join-Path $CarpetaSimulacion "perfil"
     $od = Join-Path $perfil "OneDrive - Curifor S.A"
     $escritorio = Join-Path $perfil "Escritorio"
+    $documentos = Join-Path $perfil "Documentos"
     New-Item -ItemType Directory -Force $perfil, $escritorio | Out-Null
     if (-not $ApiUrl) { $ApiUrl = "http://127.0.0.1:8765" }
     if (-not $Origen) { $Origen = Split-Path $PSScriptRoot -Parent }
@@ -118,6 +164,7 @@ else {
     $perfil = $env:USERPROFILE
     $od = $env:OneDriveCommercial
     $escritorio = [Environment]::GetFolderPath("Desktop")
+    $documentos = [Environment]::GetFolderPath("MyDocuments")
     if (-not $ApiUrl) { $ApiUrl = $API_PRODUCCION }
     if (-not $Origen) { $Origen = $REPO_GITHUB }
     if (-not $Rama) { $Rama = $RAMA_MOTOR }
@@ -170,6 +217,23 @@ function Buscar-Python {
     return $mejor
 }
 
+# El Python portable que trae el kit del programa del ERP (python\python.exe dentro de
+# su carpeta). Es para cuando el PC bloquea los instaladores por política: winget no
+# puede instalar Python, pero ese ya está y sirve para el motor (el del kit es 3.12 y
+# trae venv y ensurepip; las librerías de requirements-motor.txt tienen ruedas para
+# 3.12). El "embebible" de python.org no trae venv: ese no sirve y se salta.
+function Buscar-PythonDelKit {
+    foreach ($dir in Carpetas-KitRobot) {
+        $exe = Join-Path $dir "python\python.exe"
+        if (-not (Test-Path $exe)) { continue }
+        $r = Correr $exe @("-c", "import sys, venv, ensurepip; print('%d.%d' % sys.version_info[:2])")
+        if ($r.codigo -ne 0 -or $r.salida -notmatch '(\d+)\.(\d+)\s*$') { continue }
+        if ([int]$matches[1] -ne 3 -or [int]$matches[2] -lt 12) { continue }
+        return @{ exe = $exe; version = "3.$($matches[2])" }
+    }
+    return $null
+}
+
 function Buscar-Git {
     $g = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($g) { return $g.Source }
@@ -202,6 +266,10 @@ if (-not $python -or $python.version -ne "3.14") {
     if ($nuevo) { $python = $nuevo }
 }
 if (-not $python) {
+    $python = Buscar-PythonDelKit
+    if ($python) { Ojo "No se pudo instalar Python: se usa el que trae el programa del ERP." }
+}
+if (-not $python) {
     Frenar "No hay Python en este PC y no se pudo instalar solo." @(
         "Instálalo desde https://www.python.org/downloads/ (Python 3.14, 'Download for Windows').",
         "En la primera pantalla marca 'Add python.exe to PATH' y después 'Install Now'.",
@@ -232,14 +300,84 @@ $env:GCM_INTERACTIVE = "never"
 
 # ================================================================== 2) Código
 Titulo "[2/8] Código del motor"
-foreach ($raiz in @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer, $od) | Where-Object { $_ }) {
-    if ($destino.StartsWith($raiz.TrimEnd("\") + "\", [StringComparison]::OrdinalIgnoreCase)) {
-        Frenar "La carpeta de destino quedó dentro de OneDrive ($destino)." @(
-            "OneDrive sincronizaría el entorno de Python y los registros, y rompe el motor.",
-            "Avísale a quien mantiene el motor.")
-    }
+if (Dentro-DeOneDrive $destino) {
+    Frenar "La carpeta de destino quedó dentro de OneDrive ($destino)." @(
+        "OneDrive sincronizaría el entorno de Python y los registros, y rompe el motor.",
+        "Avísale a quien mantiene el motor.")
 }
-if (Test-Path (Join-Path $destino ".git")) {
+
+# git valida los certificados con el almacén de Windows (schannel) y no con el
+# ca-bundle de OpenSSL: la red de la empresa revisa las conexiones seguras con su propio
+# certificado, que Windows conoce y OpenSSL no. Un Git instalado antes de la 2.48.1, o
+# uno portable puesto por TI, usa OpenSSL, y ahí el clone fallaba con "SSL certificate
+# problem" y el consejo de revisar internet. Queda además en la configuración del
+# repositorio, así el fetch de "Actualizar motor" la hereda sin tocar la global.
+function Fijar-Schannel {
+    Correr $git @("-C", $destino, "config", "http.sslBackend", "schannel") | Out-Null
+}
+function Explicar-Certificado($salida) {
+    if ($salida -match $ERROR_CERTIFICADO) {
+        return @("No es falta de internet: la red de la empresa revisa las conexiones seguras con su",
+                 "propio certificado y Git no lo reconoce. Pídele a TI que deje Git usando el almacén",
+                 "de certificados de Windows (git config --system http.sslBackend schannel).")
+    }
+    return @("Revisa que el PC tenga internet y vuelve a intentarlo.")
+}
+
+# Baja el código en una carpeta al lado y recién al terminar bien la renombra. Si la
+# descarga se cortaba a mitad (se cerró la ventana, se apagó el PC), quedaba en $destino
+# un .git a medias que después parecía instalado, y el instalador no se recuperaba nunca.
+function Clonar-Motor {
+    $temporal = "$destino.bajando"
+    if (Test-Path $temporal) { Remove-Item $temporal -Recurse -Force }
+    Info "Bajando el código a $destino ..."
+    New-Item -ItemType Directory -Force (Split-Path $destino -Parent) | Out-Null
+    $c = Correr $git @("-c", "http.sslBackend=schannel", "clone", "--quiet", "--branch", $Rama, $Origen, $temporal) -Mostrar
+    if ($c.codigo -ne 0) {
+        Remove-Item $temporal -Recurse -Force -ErrorAction SilentlyContinue
+        Frenar "No se pudo bajar el código del motor." (@(Explicar-Certificado $c.salida) +
+            @("Detalle: $(($c.salida -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 1))"))
+    }
+    try { Rename-Item $temporal (Split-Path $destino -Leaf) -ErrorAction Stop }
+    catch {
+        Frenar "El código se bajó, pero no pude dejarlo en $destino." @(
+            "Vuelve a correr el instalador. Si se repite, reinicia el PC y vuelve a intentarlo.",
+            "Detalle: $($_.Exception.Message)")
+    }
+    Fijar-Schannel
+    Bien "Código listo (rama $Rama, versión $((Correr $git @('-C', $destino, 'rev-parse', '--short', 'HEAD')).salida))."
+}
+
+# Por qué la copia que hay en $destino no sirve, o $null si sirve. Pasa si la bajó un
+# instalador anterior y se cortó a mitad: git responde "bad object HEAD", o el código
+# quedó a medio desempaquetar y faltan archivos.
+function Motor-Danado {
+    if (-not (Test-Path (Join-Path $destino ".git"))) { return $null }
+    $h = Correr $git @("-C", $destino, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+    if ($h.codigo -ne 0) { return "no tiene una versión completa" }
+    $s = Correr $git @("-C", $destino, "status", "--porcelain", "--untracked-files=no")
+    if ($s.codigo -ne 0) { return "git no la puede leer: $(($s.salida -split "`n")[0])" }
+    if (-not (Test-Path (Join-Path $destino "scripts\robot_erp.ps1"))) { return "le faltan archivos del motor" }
+    return $null
+}
+
+$danado = Motor-Danado
+if ($danado) {
+    $aparte = "$destino-danada-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    Ojo "La copia del motor que había en $destino no sirve ($danado)."
+    Info "Seguramente se cortó la descarga. Se deja aparte y se baja de nuevo."
+    try { Rename-Item $destino (Split-Path $aparte -Leaf) -ErrorAction Stop }
+    catch {
+        Frenar "No pude apartar la carpeta $destino (algún programa la está usando)." @(
+            "Reinicia el PC y vuelve a correr el instalador.",
+            "Detalle: $($_.Exception.Message)")
+    }
+    Info "Quedó en $aparte (se puede borrar cuando todo funcione)."
+    Clonar-Motor
+    # Las claves que ya se habían escrito no se vuelven a pedir.
+    if (Test-Path (Join-Path $aparte ".env")) { Copy-Item (Join-Path $aparte ".env") $envFile }
+}
+elseif (Test-Path (Join-Path $destino ".git")) {
     $origenActual = (Correr $git @("-C", $destino, "remote", "get-url", "origin")).salida
     $ramaActual = (Correr $git @("-C", $destino, "rev-parse", "--abbrev-ref", "HEAD")).salida
     $shaActual = (Correr $git @("-C", $destino, "rev-parse", "--short", "HEAD")).salida
@@ -248,10 +386,15 @@ if (Test-Path (Join-Path $destino ".git")) {
         Frenar "Esa carpeta es una copia de otro proyecto ($origenActual). No la toco." @(
             "Muévela a otro lado y vuelve a correr el instalador.")
     }
+    Fijar-Schannel
     $respuesta = if ($Simular) { "S" } else { Read-Host "    ¿Bajar la última versión? (S/N) [S]" }
     if ($respuesta -eq "" -or $respuesta -match '^[sS]') {
-        $cambios = (Correr $git @("-C", $destino, "status", "--porcelain", "--untracked-files=no")).salida
-        if ($cambios) {
+        $cambios = Correr $git @("-C", $destino, "status", "--porcelain", "--untracked-files=no")
+        if ($cambios.codigo -ne 0) {
+            Ojo "No se actualiza: git no pudo revisar el código ($(($cambios.salida -split "`n")[0]))."
+            $pendientes.Add("El código del motor no se pudo revisar: vuelve a correr el instalador.")
+        }
+        elseif ($cambios.salida) {
             Ojo "No se actualiza: hay archivos del motor cambiados a mano en este PC."
             $pendientes.Add("El código del motor tiene cambios a mano: revisarlos antes de actualizar.")
         }
@@ -261,6 +404,7 @@ if (Test-Path (Join-Path $destino ".git")) {
             $shaNuevo = (Correr $git @("-C", $destino, "rev-parse", "--short", "HEAD")).salida
             if ($m.codigo -ne 0) {
                 Ojo "No se pudo actualizar: $(($m.salida -split "`n")[0])"
+                if ($m.salida -match $ERROR_CERTIFICADO) { foreach ($l in (Explicar-Certificado $m.salida)) { Info $l } }
                 $pendientes.Add("El código del motor no se pudo actualizar (ver arriba).")
             }
             elseif ($shaNuevo -eq $shaActual) { Bien "Ya estaba al día." }
@@ -273,17 +417,14 @@ elseif (Test-Path $destino) {
         "Muévela o bórrala y vuelve a correr el instalador.")
 }
 else {
-    Info "Bajando el código a $destino ..."
-    New-Item -ItemType Directory -Force (Split-Path $destino -Parent) | Out-Null
-    $c = Correr $git @("clone", "--quiet", "--branch", $Rama, $Origen, $destino) -Mostrar
-    if ($c.codigo -ne 0) {
-        Frenar "No se pudo bajar el código del motor." @(
-            "Revisa que el PC tenga internet y vuelve a intentarlo.",
-            "Detalle: $(($c.salida -split "`n")[-1])")
-    }
-    Bien "Código listo (rama $Rama, versión $((Correr $git @('-C', $destino, 'rev-parse', '--short', 'HEAD')).salida))."
+    Clonar-Motor
 }
 $scripts = Join-Path $destino "scripts"
+if (-not (Test-Path (Join-Path $scripts "robot_erp.ps1"))) {
+    Frenar "A la copia del motor de este PC le faltan archivos (scripts\robot_erp.ps1)." @(
+        "Vuelve a correr el instalador y contesta S cuando pregunte si bajar la última versión.",
+        "Si se repite, avísale a quien mantiene el motor.")
+}
 . (Join-Path $scripts "robot_erp.ps1")
 
 # ================================================================= 3) Entorno
@@ -295,28 +436,52 @@ if (-not (Test-Path $req)) {
     Frenar "La versión del motor que se bajó no trae requirements-motor.txt." @(
         "Avísale a quien mantiene el motor: hay que publicar la rama $Rama con ese archivo.")
 }
-if (Test-Path $venvPy) {
-    $v = Correr $venvPy @("-c", "import sys; print('%d.%d' % sys.version_info[:2])")
-    if ($v.codigo -ne 0) {
-        Ojo "El entorno que había no funciona: se arma de nuevo."
-        Remove-Item $venv -Recurse -Force
+# El entorno se arma con el Python del paso 1 (o se rearma desde cero con -Rehacer).
+# `python -m venv` tarda unos 15 segundos porque instala pip: si en ese rato se cerraba
+# la ventana, quedaba un entorno sin pip que cada reintento conservaba, y el instalador
+# frenaba siempre con "casi siempre es la conexión". Ahora se revisa que pip esté, se
+# repara con ensurepip y, si tampoco, se arma de nuevo.
+function Armar-Entorno([switch]$Rehacer) {
+    if ($Rehacer -and (Test-Path $venv)) { Remove-Item $venv -Recurse -Force }
+    if (Test-Path $venvPy) {
+        $v = Correr $venvPy @("-c", "import sys; print('%d.%d' % sys.version_info[:2])")
+        if ($v.codigo -ne 0) {
+            Ojo "El entorno que había no funciona: se arma de nuevo."
+            Remove-Item $venv -Recurse -Force
+        }
+        elseif ((Correr $venvPy @("-m", "pip", "--version")).codigo -ne 0) {
+            Ojo "Al entorno que había le falta pip (se cortó mientras se armaba): se repara."
+            Correr $venvPy @("-m", "ensurepip", "--upgrade") | Out-Null
+            if ((Correr $venvPy @("-m", "pip", "--version")).codigo -ne 0) {
+                Ojo "No se pudo reparar: se arma de nuevo."
+                Remove-Item $venv -Recurse -Force
+            }
+        }
     }
+    if (-not (Test-Path $venvPy)) {
+        $r = Correr $python.exe @("-m", "venv", $venv)
+        if ($r.codigo -ne 0) { Frenar "No se pudo crear el entorno de Python." @("Detalle: $($r.salida)") }
+    }
+    if ((Correr $venvPy @("-m", "pip", "--version")).codigo -ne 0) {
+        Remove-Item $venv -Recurse -Force -ErrorAction SilentlyContinue
+        Frenar "El entorno de Python quedó sin pip (el que instala las librerías)." @(
+            "No es la conexión. Vuelve a correr el instalador: lo arma de nuevo desde cero.",
+            "Si se repite, avísale a quien mantiene el motor.")
+    }
+    if (-not $Simular) { Correr $venvPy @("-m", "pip", "install", "--quiet", "--upgrade", "pip") | Out-Null }
+    Info "Instalando las librerías del motor (versiones fijas de requirements-motor.txt)..."
+    $pip = Correr $venvPy @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", $req)
+    if ($pip.codigo -ne 0) {
+        Frenar "No se pudieron instalar las librerías del motor." @(
+            "Casi siempre es la conexión: revisa que el PC tenga internet y vuelve a intentarlo.",
+            "Detalle: $(($pip.salida -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 1))")
+    }
+    $prueba = Correr $venvPy @("-c", "import polars, fastexcel, openpyxl, httpx, truststore; print('ok')")
+    if ($prueba.codigo -ne 0) { Frenar "Las librerías quedaron instaladas pero no cargan." @("Detalle: $($prueba.salida)") }
+    Bien "Entorno listo (Python $($python.version))."
 }
-if (-not (Test-Path $venvPy)) {
-    $r = Correr $python.exe @("-m", "venv", $venv)
-    if ($r.codigo -ne 0) { Frenar "No se pudo crear el entorno de Python." @("Detalle: $($r.salida)") }
-}
-if (-not $Simular) { Correr $venvPy @("-m", "pip", "install", "--quiet", "--upgrade", "pip") | Out-Null }
-Info "Instalando las librerías del motor (versiones fijas de requirements-motor.txt)..."
-$pip = Correr $venvPy @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", $req)
-if ($pip.codigo -ne 0) {
-    Frenar "No se pudieron instalar las librerías del motor." @(
-        "Casi siempre es la conexión: revisa que el PC tenga internet y vuelve a intentarlo.",
-        "Detalle: $(($pip.salida -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 1))")
-}
-$prueba = Correr $venvPy @("-c", "import polars, fastexcel, openpyxl, httpx, truststore; print('ok')")
-if ($prueba.codigo -ne 0) { Frenar "Las librerías quedaron instaladas pero no cargan." @("Detalle: $($prueba.salida)") }
-Bien "Entorno listo."
+Armar-Entorno
+$listo.Add("El motor en $destino (Python $($python.version)).")
 
 # ============================================================ 4) Configuración
 Titulo "[4/8] Configuración"
@@ -461,8 +626,17 @@ $cfg = $null; $clave = $null; $secreto = $null
 # ======================================================== 5) Programa del ERP
 Titulo "[5/8] Programa que baja las tablas del ERP"
 $robot = $null
-if ($Simular) {
+if ($Simular -and $SimularSinRobot) {
+    Sim "Sin programa del ERP."
+}
+elseif ($Simular) {
     $robot = Join-Path $CarpetaSimulacion "automatizacion"
+    if ($SimularRobotEnOneDrive) {
+        $robot = Join-Path $od "Escritorio\INSTALAR_EN_PC_JEFA\automatizacion"
+        New-Item -ItemType Directory -Force $robot | Out-Null
+        Set-Content (Join-Path (Split-Path $robot -Parent) "automatizacion.zip") "zip de prueba" -Encoding ascii
+        Set-Content (Join-Path $robot ".env") "CLAVE_DE_PRUEBA=ficticia" -Encoding ascii
+    }
     New-Item -ItemType Directory -Force $robot | Out-Null
     Set-Content (Join-Path $robot "panel.bat") "@echo off" -Encoding ascii
     Set-Content (Join-Path $robot "flexline_flows.py") @(
@@ -501,6 +675,66 @@ if ($robot -and -not (Es-CarpetaRobot $robot)) {
     else { Ojo "Esa carpeta no es la del programa del ERP (no tiene flexline_flows.py)." }
     $robot = $null
 }
+# El programa guarda en su .env las claves del ERP, y sus registros al lado. Si su
+# carpeta queda dentro de OneDrive (el kit se deja en el Escritorio, y OneDrive suele
+# respaldar el Escritorio), todo eso se sube a la nube. Se copia a una carpeta fuera de
+# OneDrive y se ofrece borrar la de OneDrive y el .zip del kit, que también lo trae.
+if ($robot -and (Dentro-DeOneDrive $robot)) {
+    $fuera = Join-Path $perfil "automatizacion"
+    Ojo "El programa del ERP está dentro de OneDrive: $robot"
+    Info "Su archivo .env tiene las claves del ERP y OneDrive lo sube a la nube, junto con sus registros."
+    $r = if ($Simular) { "S" } else { Read-Host "    ¿Copiarlo a $fuera, fuera de OneDrive? (S/N) [S]" }
+    if ($r -eq "" -or $r -match '^[sS]') {
+        $copiado = $false
+        if ((Test-Path $fuera) -and -not (Es-CarpetaRobot $fuera)) {
+            Ojo "Ya existe $fuera y no es el programa del ERP: no la toco."
+        }
+        else {
+            # robocopy copia todo, también el .env y lo oculto; sale con menos de 8 si
+            # copió bien.
+            $rc = Correr "$env:SystemRoot\System32\robocopy.exe" @($robot, $fuera, "/E", "/R:1", "/W:1",
+                                                                  "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
+            if ($rc.codigo -lt 8) { $copiado = Es-CarpetaRobot $fuera }
+            else { Ojo "No se pudo copiar: $(($rc.salida -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 1))" }
+        }
+        if ($copiado) {
+            $enOneDrive = $robot
+            $robot = $fuera
+            Bien "Copiado a $fuera. Desde ahora el programa (y su panel.bat) está ahí."
+            # Si el entorno del motor se armó con el Python del kit (porque el PC no deja
+            # instalar Python), ese Python es el de la carpeta que se va a borrar: el
+            # entorno se arma de nuevo con el de la copia.
+            $homeVenv = Get-Content (Join-Path $venv "pyvenv.cfg") -ErrorAction SilentlyContinue |
+                        Where-Object { $_ -match '^\s*home\s*=' } |
+                        ForEach-Object { ($_ -replace '^\s*home\s*=\s*', '').Trim() } | Select-Object -First 1
+            $pythonEnKit = Dentro-De $python.exe $enOneDrive
+            if ($pythonEnKit) {
+                $python.exe = Join-Path $fuera $python.exe.Substring($enOneDrive.TrimEnd("\").Length + 1)
+            }
+            if ($pythonEnKit -or ($homeVenv -and (Dentro-De $homeVenv $enOneDrive))) {
+                Info "El motor usaba el Python de esa carpeta: se arma de nuevo su entorno con el de la copia."
+                Armar-Entorno -Rehacer
+            }
+            $zip = Join-Path (Split-Path $enOneDrive -Parent) "automatizacion.zip"
+            $queBorrar = if (Test-Path $zip) { "$enOneDrive y $zip" } else { $enOneDrive }
+            $r = if ($Simular) { "S" } else { Read-Host "    ¿Borrar $queBorrar? Así las claves del ERP dejan de estar en la nube. (S/N) [S]" }
+            if ($r -eq "" -or $r -match '^[sS]') {
+                try {
+                    Remove-Item $enOneDrive -Recurse -Force -ErrorAction Stop
+                    if (Test-Path $zip) { Remove-Item $zip -Force -ErrorAction Stop }
+                    Bien "Borrado de OneDrive: $enOneDrive"
+                }
+                catch {
+                    Ojo "No se pudo borrar todo: $($_.Exception.Message)"
+                    $pendientes.Add("Borrar a mano $queBorrar (tiene las claves del ERP).")
+                }
+            }
+            else { $pendientes.Add("Borrar $($queBorrar): tiene las claves del ERP y OneDrive las sube a la nube.") }
+        }
+        else { $pendientes.Add("Sacar el programa del ERP de OneDrive ($robot): su .env tiene las claves del ERP.") }
+    }
+    else { $pendientes.Add("Sacar el programa del ERP de OneDrive ($robot): su .env tiene las claves del ERP.") }
+}
 if ($robot) {
     Escribir-Env ([ordered]@{ ROBOT_ERP_DIR = $robot })
     Bien "Programa del ERP: $robot"
@@ -534,13 +768,16 @@ $acceso.Description = "Baja las tablas del ERP y publica el sugerido de compras"
 $acceso.IconLocation = "$env:SystemRoot\System32\shell32.dll,238"
 $acceso.Save()
 Bien "Acceso creado: $lnk"
+# Sin el programa del ERP el acceso solo diría que no lo encuentra: no cuenta como listo.
+if ($robot) { $listo.Add("El acceso 'Actualizar plataforma' en el Escritorio.") }
 Info "Doble clic cuando quieras dejar la plataforma al día (35 a 45 minutos en total)."
 if ($Simular) {
     Sim "Prueba del acceso, sin el programa del ERP de verdad (el motor tampoco publica):"
     # No se corre el motor en la simulación: solo se revisa que el acceso arranque
     # y encuentre al programa de prueba. El motor oficial nunca corre acá.
-    $pyR = Buscar-PythonRobot $robot
-    if ($pyR) {
+    $pyR = if ($robot) { Buscar-PythonRobot $robot } else { $null }
+    if (-not $robot) { Sim "Sin programa del ERP: no se prueba." }
+    elseif ($pyR) {
         Push-Location $robot
         $r = Correr $pyR @("flexline_flows.py", "descargar", "--tablas", $TABLAS_ROBOT)
         Pop-Location
@@ -650,6 +887,10 @@ finally {
         if ($quedan.Count -eq 0) { Sim "Tareas de prueba borradas." } else { Ojo "Quedaron tareas de prueba: $($quedan.TaskName -join ', ')" }
     }
 }
+if ($registradas.Count -eq $tareas.Count) {
+    $listo.Add("Las tareas: el sugerido a las 09:30 si no se hizo antes, el rescate al iniciar " +
+               "sesión si el PC se reinició de madrugada, y el agente de los botones.")
+}
 if (-not $Simular) {
     Info "El dueño tenía las mismas tareas en su PC: el día del cambio de PC titular hay que"
     Info "deshabilitarlas allá (ver docs\instalar-pc-jefa.md)."
@@ -663,7 +904,22 @@ Info "Qué archivo leería el motor de cada tabla, y aviso a la pantalla Fuentes
 Push-Location (Join-Path $destino "apps\api")
 $env:PYTHONIOENCODING = "utf-8"
 $probar = Correr $venvPy @("-m", "src.motor.config_fuentes", "--probar", "--reportar") -Mostrar
+# --probar no guarda nada. Sin la configuración guardada en este PC, si en su primera
+# corrida de las 09:30 la plataforma no respondía (Render despertando o reiniciándose),
+# el motor no sabía quién es el titular, se creía titular y publicaba a la misma hora
+# que el PC titular, con sus propios archivos.
+$guardada = Correr $venvPy @("-m", "src.motor.config_fuentes", "--guardar-config")
 Pop-Location
+if ($guardada.codigo -eq 0) {
+    Bien "Configuración de Fuentes de datos guardada en este PC (sabe cuál es el PC titular)."
+}
+else {
+    Ojo "No se pudo traer la configuración de Fuentes de datos de la plataforma."
+    Info "Mientras no la tenga, si la plataforma no responde cuando este PC calcula, podría"
+    Info "publicar aunque no sea el titular."
+    $pendientes.Add("Volver a correr el instalador con la plataforma andando, para que este PC guarde " +
+                    "la configuración de Fuentes de datos.")
+}
 if ($probar.codigo -eq 0 -and $probar.salida -match 'Reporte enviado a la plataforma') {
     Bien "La plataforma recibió la prueba: este PC ya aparece en Cargar > Fuentes de datos."
     $listo.Add("Este PC aparece en Fuentes de datos (todavía no es el titular: no publica).")
@@ -717,11 +973,9 @@ $cfgFinal = $null
 Write-Host "`n============================================================" -ForegroundColor Green
 Write-Host " Resumen" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
+# Solo lo que de verdad quedó: antes las tareas y el acceso salían aquí siempre, aunque
+# más abajo "Falta" dijera que las tareas no se pudieron crear.
 Write-Host "Quedó listo:" -ForegroundColor Green
-Write-Host "  - El motor en $destino (Python $($python.version))."
-Write-Host "  - El acceso 'Actualizar plataforma' en el Escritorio."
-Write-Host "  - Las tareas: el sugerido a las 09:30 si no se hizo antes, el rescate al iniciar"
-Write-Host "    sesión si el PC se reinició de madrugada, y el agente de los botones."
 foreach ($l in $listo) { Write-Host "  - $l" }
 if ($pendientes.Count -gt 0) {
     Write-Host "`nFalta:" -ForegroundColor Yellow
