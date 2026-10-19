@@ -75,22 +75,32 @@ minutos la fuente queda como "Bajando de OneDrive".
 
 ## Cambio de PC titular
 
-Solo el PC titular publica. Se elige en Fuentes de datos. El mismo día, en el PC que
+Solo el PC titular publica. Se elige en Fuentes de datos. El PC nuevo se prepara antes
+con `INSTALAR PLATAFORMA.cmd` (ver `docs/instalar-pc-jefa.md`): deja el motor, el
+acceso "Actualizar plataforma" y las tareas. El mismo día del cambio, en el PC que
 deja de ser titular, deshabilita sus tareas en el Programador de tareas de Windows
 (clic derecho, **Deshabilitar**):
 
 - `Sugerido Curifor - Motor diario`
+- `Sugerido Curifor - Motor al iniciar sesion` (recupera la corrida si el PC se
+  reinició de madrugada)
 - `Sugerido Curifor - Vigentes FORD semanal`
-- `Sugerido Curifor - Agente`, si está: la deja `scripts/instalar_agente.ps1` y
-  atiende el botón "Actualizar ahora".
+- `Sugerido Curifor - Agente`, si está: la deja `scripts/instalar_agente.ps1` o el
+  instalador, y atiende los botones "Actualizar ahora" y "Actualizar motor".
 
 O, en PowerShell como administrador:
 
 ```powershell
 Disable-ScheduledTask -TaskName "Sugerido Curifor - Motor diario"
+Disable-ScheduledTask -TaskName "Sugerido Curifor - Motor al iniciar sesion"
 Disable-ScheduledTask -TaskName "Sugerido Curifor - Vigentes FORD semanal"
 Disable-ScheduledTask -TaskName "Sugerido Curifor - Agente"   # si existe
 ```
+
+En el PC de la jefa la tarea de las 09:30 no corre el motor directo sino
+`scripts/tarea_si_no_corrio_hoy.ps1`: si ese día ya se usó el acceso "Actualizar
+plataforma" (deja la línea RESULTADO en el log del día), no calcula de nuevo, y si el
+acceso está bajando las tablas, espera a que termine.
 
 La guarda de titular igual impide que ese PC publique, pero sus tareas siguen
 corriendo. Si los dos PCs tienen el agente, compiten por cada clic del botón: si
