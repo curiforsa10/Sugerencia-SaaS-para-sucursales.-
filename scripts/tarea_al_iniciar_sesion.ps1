@@ -12,8 +12,8 @@
 #  Asi no corre dos veces ni antes que el programa del ERP.
 #
 #  Las dos ultimas condiciones las mira tarea_si_no_corrio_hoy.ps1, que ademas
-#  espera si el acceso "Actualizar plataforma" esta bajando las tablas (en el PC de
-#  la jefa: ella puede abrirlo apenas inicia sesion). Antes este script miraba solo
+#  espera si el acceso "Actualizar plataforma" esta bajando las tablas (solo
+#  existe si alguien lo creo a mano: el instalador del PC de la jefa ya no lo deja). Antes este script miraba solo
 #  si existia el candado: uno viejo, de una corrida cortada por un apagon, dejaba
 #  el dia sin recuperar.
 # ============================================================

@@ -76,10 +76,11 @@ minutos la fuente queda como "Bajando de OneDrive".
 ## Cambio de PC titular
 
 Solo el PC titular publica. Se elige en Fuentes de datos. El PC nuevo se prepara antes
-con `INSTALAR PLATAFORMA.cmd` (ver `docs/instalar-pc-jefa.md`): deja el motor, el
-acceso "Actualizar plataforma" y las tareas. El mismo día del cambio, en el PC que
-deja de ser titular, deshabilita sus tareas en el Programador de tareas de Windows
-(clic derecho, **Deshabilitar**):
+con `INSTALAR PLATAFORMA.cmd` (ver `docs/instalar-pc-jefa.md`): deja el motor y la
+tarea del agente, que atiende el botón "Actualizar ahora". No deja tareas que calculen
+solas: en el PC nuevo el motor corre únicamente cuando alguien aprieta el botón. El
+mismo día del cambio, en el PC que deja de ser titular, deshabilita sus tareas en el
+Programador de tareas de Windows (clic derecho, **Deshabilitar**):
 
 - `Sugerido Curifor - Motor diario`
 - `Sugerido Curifor - Motor al iniciar sesion` (recupera la corrida si el PC se
@@ -97,12 +98,12 @@ Disable-ScheduledTask -TaskName "Sugerido Curifor - Vigentes FORD semanal"
 Disable-ScheduledTask -TaskName "Sugerido Curifor - Agente"   # si existe
 ```
 
-En el PC de la jefa la tarea de las 09:30 no corre el motor directo sino
-`scripts/tarea_si_no_corrio_hoy.ps1`: si ese día ya hubo una corrida que salió bien
-(el acceso "Actualizar plataforma" y el botón "Actualizar ahora" dejan la línea
-RESULTADO en el log del día), no calcula de nuevo; si la última falló, la vuelve a
-intentar. Si el acceso está bajando las tablas espera a que termine, y si el agente
-está instalando una versión nueva del motor ("Actualizar motor"), también.
+En el PC de la jefa no hay tareas que calculen solas: el motor corre cuando se aprieta
+"Actualizar ahora" y el agente toma el pedido. Si las tablas del ERP están viejas el
+motor no publica y la tarjeta de la web dice qué archivos faltan. Los scripts
+`scripts/tarea_si_no_corrio_hoy.ps1` y `scripts/tarea_al_iniciar_sesion.ps1` (que
+recuperan la corrida de las 09:30 si el PC se reinició de madrugada) los usa el PC del
+dueño hasta el día del cambio; el instalador del PC nuevo ya no los registra.
 
 La guarda de titular igual impide que ese PC publique, pero sus tareas siguen
 corriendo. Si los dos PCs tienen el agente, compiten por cada clic del botón: si

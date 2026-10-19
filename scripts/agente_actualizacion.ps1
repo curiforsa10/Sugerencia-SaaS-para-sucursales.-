@@ -14,6 +14,8 @@
 #
 #  No lo ejecuta una persona: lo dispara una tarea programada de Windows cada minuto
 #  (la crean instalar_agente.ps1 o instalar_pc_jefa.ps1). Corre oculto, sin ventanas.
+#  En el PC de la jefa es lo unico que corre el motor: no tiene la tarea de las 09:30
+#  ni la de al iniciar sesion. El motor corre cuando alguien aprieta el boton.
 #
 #  Este archivo va en UTF-8 CON BOM: los mensajes de la tarjeta llevan tildes, y sin
 #  BOM Windows PowerShell 5.1 lo lee como Windows-1252 y las rompe.
@@ -83,8 +85,9 @@ if (-not $secreto) {
 # Lleva "<PID> <fecha> <tipo>": si el proceso que lo dejo ya no corre (se cerro la
 # sesion, se apago o se reinicio el PC), no frena. Antes solo se miraba la hora, y un
 # "Actualizar motor" cortado dejaba al PC ignorando todos los botones por una hora
-# mientras la web decia que estaba apagado. Lo leen tambien la tarea de las 09:30 y el
-# acceso "Actualizar plataforma" (ActualizacionMotor-EnCurso, en salida_motor.ps1).
+# mientras la web decia que estaba apagado. Lo leen tambien las tareas del PC del dueno
+# (la de las 09:30 y la de al iniciar sesion) y el acceso "Actualizar plataforma"
+# (ActualizacionMotor-EnCurso, en salida_motor.ps1).
 $candado = "$root\.agente.lock"
 if (Test-Path $candado) {
     $texto = "$(Get-Content $candado -Raw -ErrorAction SilentlyContinue)".Trim()
@@ -294,9 +297,9 @@ function Ya-EnCurso($desde) {
 
 # Devuelve @{ ok; mensaje }.
 function Correr-Motor {
-    # Con otra corrida andando (la tarea de las 09:30, o el acceso "Actualizar
-    # plataforma") el motor sale con 0 sin calcular, y la tarjeta decia "terminó
-    # correctamente" sin haber hecho nada.
+    # Con otra corrida andando (en el PC del dueno, la tarea de las 09:30; en cualquiera,
+    # el acceso "Actualizar plataforma" o un clic anterior) el motor sale con 0 sin
+    # calcular, y la tarjeta decia "terminó correctamente" sin haber hecho nada.
     $enCurso = Corrida-EnCurso $root
     if ($enCurso) { return (Ya-EnCurso $enCurso) }
     # El acceso "Actualizar plataforma" esta bajando las tablas del ERP y publica
@@ -352,10 +355,11 @@ function Correr-Motor {
         return (Ya-EnCurso $null)
     }
     # El motor corrio de verdad: queda como la corrida del dia, igual que la de
-    # tarea_diaria.ps1. La tarea de las 09:30 y la de al iniciar sesion
-    # (tarea_si_no_corrio_hoy.ps1) miran la linea RESULTADO de ese log: sin esto, un
-    # "Actualizar ahora" de las 08:45 que publico no contaba, y a las 09:30 se volvia
-    # a calcular lo mismo (30 minutos mas, con los botones ocupados).
+    # tarea_diaria.ps1. En el PC del dueno, la tarea de las 09:30 y la de al iniciar
+    # sesion (tarea_si_no_corrio_hoy.ps1) miran la linea RESULTADO de ese log: sin esto,
+    # un "Actualizar ahora" de las 08:45 que publico no contaba, y a las 09:30 se volvia
+    # a calcular lo mismo (30 minutos mas, con los botones ocupados). En el PC de la jefa
+    # no hay esas tareas: la linea solo deja constancia en el log.
     $logMotor = "$logDir\motor_$($inicio.ToString('yyyy-MM-dd')).log"
     $resultado = if ($codigo -eq 0) { "RESULTADO: OK (agente)" } else { "RESULTADO: FALLO (codigo $codigo, agente)" }
     try {
@@ -369,6 +373,23 @@ function Correr-Motor {
         $filas = Filas-Publicadas $salida
         if ($filas) { return @{ ok = $true; mensaje = "Se publicaron $filas filas." } }
         return @{ ok = $true; mensaje = "El motor terminó correctamente." }
+    }
+    # El motor frenó porque faltan archivos o están viejos: se dice cuáles y qué hacer.
+    # Con el botón como única forma de actualizar, quien lo aprieta tiene que saber que
+    # primero van las tablas del ERP (su programa las deja en Bases de datos).
+    $frenados = @(Archivos-Frenados $salida)
+    if ($frenados.Count -gt 0) {
+        # Cada archivo se acorta antes de armar la lista: así el "y N más" nunca se corta.
+        $cortos = @($frenados | Select-Object -First 3 | ForEach-Object {
+            if ($_.Length -gt 90) { $_.Substring(0, 89) + "…" } else { $_ } })
+        $cuales = $cortos -join "; "
+        if ($frenados.Count -gt 3) { $cuales += "; y $($frenados.Count - 3) más" }
+        # Bajar las tablas del ERP solo arregla lo viejo ("N dias habiles"); una carpeta que
+        # falta o un archivo elegido por dos fuentes se ve en Fuentes de datos.
+        $soloViejos = @($frenados | Where-Object { $_ -notmatch 'dias habiles' }).Count -eq 0
+        $queHacer = if ($soloViejos) { "Baja las tablas del ERP con su programa y vuelve a apretar el botón." }
+                    else { "Revisa los archivos en Fuentes de datos (o avisa a un admin) y vuelve a apretar el botón." }
+        return @{ ok = $false; mensaje = "No se publicó nada: faltan archivos o están desactualizados ($cuales). $queHacer" }
     }
     # Los errores utiles del motor salen como "ERROR ..." o como la ultima linea
     # de un traceback; cualquiera de los dos le dice al usuario que revisar.

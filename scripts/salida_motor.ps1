@@ -36,6 +36,28 @@ function Filas-Publicadas($salida) {
     return $null
 }
 
+# Los archivos por los que el motor freno sin publicar, vencidos o faltantes: el bloque
+# que imprime debajo del "ERROR: ..." ("Archivos vencidos:", o "Problemas:" con Fuentes
+# de datos activa), una linea "  - <archivo>: ..." por archivo. Lista vacia si el motor
+# no freno por eso. Se usa para decirle a quien aprieta el boton que bajar y que hacer,
+# en vez de dejar solo "ERROR: No se carga a produccion con archivos desactualizados.".
+function Archivos-Frenados($salida) {
+    $items = New-Object System.Collections.Generic.List[string]
+    $dentro = $false
+    foreach ($linea in @($salida | ForEach-Object { "$_" -split "`r?`n" })) {
+        if (-not $dentro) {
+            if ($linea -match '^(Archivos vencidos|Problemas):\s*$') { $dentro = $true }
+            continue
+        }
+        # Lo ultimo que imprime el motor en el bloque es "Actualizalos ..." o "Revisalos ...".
+        if ($linea -match '^(Actualizalos|Revisalos)\b') { break }
+        # Las lineas de stdout (Python las vacia recien al salir) pueden caer en medio de
+        # las de stderr: se saltan en vez de cortar la lista.
+        if ($linea -match '^\s+-\s+(\S.*?)\s*$') { $items.Add($matches[1]) }
+    }
+    return $items.ToArray()
+}
+
 # Si el proceso que dejo un candado ("<PID> <fecha>") sigue vivo y es el mismo. Windows
 # recicla los PID, asi que el numero puede ser ahora de otro proceso con el mismo nombre:
 # el agente lanza un PowerShell cada minuto, y la tarea de las 09:30 corre en otro. Un

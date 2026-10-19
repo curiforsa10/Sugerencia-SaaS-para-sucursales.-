@@ -8,10 +8,12 @@
 #    3. El entorno de Python del motor (requirements-motor.txt).
 #    4. La configuración (.env): plataforma, cuenta del motor, clave del agente y
 #       carpetas de datos. Las claves se piden sin mostrarlas y solo van al .env.
-#    5. Dónde está el programa que baja las tablas del ERP.
-#    6. El acceso "Actualizar plataforma" en el Escritorio.
-#    7. Las tareas de Windows: la de las 09:30, la de al iniciar sesión y el agente.
-#    8. Una prueba final, sin publicar nada.
+#    5. La tarea de Windows del agente, que atiende el botón "Actualizar ahora" de la
+#       plataforma. Es la única tarea: el motor no corre solo, solo cuando alguien
+#       aprieta el botón.
+#    6. Una prueba final, sin publicar nada.
+#  El programa que baja las tablas del ERP no lo toca este instalador: ya está en el PC
+#  y deja las tablas en "Bases de datos".
 #  Se puede repetir las veces que haga falta: no pisa lo que ya está bien.
 #
 #  -Simular: hace todo en una carpeta temporal, sin instalar programas, sin tareas
@@ -26,11 +28,6 @@ param(
     [switch]$Simular,
     # Con -Simular: no crea las carpetas de OneDrive de prueba, para ver los avisos.
     [switch]$SimularSinCarpetas,
-    # Con -Simular: el programa del ERP de prueba queda dentro del OneDrive de prueba
-    # (como el kit en un Escritorio que OneDrive respalda), para ver cómo se saca de ahí.
-    [switch]$SimularRobotEnOneDrive,
-    # Con -Simular: sin programa del ERP, para ver el resumen sin él.
-    [switch]$SimularSinRobot,
     # Con -Simular: dónde (por defecto %TEMP%\simulacion-instalador). Si ya existe, se
     # comporta como una reinstalación.
     [string]$CarpetaSimulacion,
@@ -52,8 +49,6 @@ $REPO_GITHUB = "https://github.com/platoniaaa/Sugerencia-SaaS-para-sucursales.-.
 $RAMA_MOTOR = "arreglar-job-diario"
 $API_PRODUCCION = "https://sugerido-api.onrender.com"
 $CUENTA_MOTOR = "admin@curifor.com"   # la cuenta con que el motor publica
-$TAREA_DIARIA = "Sugerido Curifor - Motor diario"
-$TAREA_SESION = "Sugerido Curifor - Motor al iniciar sesion"
 $TAREA_AGENTE = "Sugerido Curifor - Agente"
 
 function Titulo($t) { Write-Host "`n==> $t" -ForegroundColor Cyan }
@@ -118,10 +113,9 @@ function Dentro-DeOneDrive($ruta) {
     return $false
 }
 
-# Las carpetas donde suele quedar el programa del ERP: las de Carpetas-RobotProbables
-# (robot_erp.ps1), copiadas acá porque ese archivo se carga recién en el paso 2 (este
-# instalador puede estar corriendo suelto, bajado de GitHub), más la carpeta fuera de
-# OneDrive adonde lo copia el paso 5.
+# Las carpetas donde suele quedar el programa del ERP. Solo se miran para sacar el
+# Python portable que trae su kit (Buscar-PythonDelKit), cuando el PC no deja instalar
+# Python; el programa en sí no se toca.
 function Carpetas-KitRobot {
     $c = @(
         "$perfil\automatizacion",
@@ -177,12 +171,12 @@ Write-Host "============================================================" -Foreg
 Write-Host " Plataforma de sugerido de compras: instalar en este PC" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 if ($Simular) { Sim "Todo pasa en $CarpetaSimulacion. No se instala nada en el PC." }
-Write-Host "Este PC va a quedar calculando el sugerido todos los días y atendiendo los"
-Write-Host "botones de la plataforma. Tarda unos 10 minutos y se hace una sola vez."
+Write-Host "Este PC va a calcular el sugerido solo cuando alguien apriete 'Actualizar ahora'"
+Write-Host "en la plataforma: nada se calcula solo. Tarda unos 10 minutos y se hace una sola vez."
 Write-Host "Si una pregunta tiene un valor entre [corchetes], Enter lo acepta."
 
 # ================================================================ 1) Python y Git
-Titulo "[1/8] Python y Git"
+Titulo "[1/6] Python y Git"
 
 # El motor se probó con Python 3.14 (el del PC del dueño). Se busca ese primero.
 function Buscar-Python {
@@ -265,9 +259,10 @@ if (-not $python -or $python.version -ne "3.14") {
     $nuevo = Buscar-Python
     if ($nuevo) { $python = $nuevo }
 }
+$pythonDelKit = $false
 if (-not $python) {
     $python = Buscar-PythonDelKit
-    if ($python) { Ojo "No se pudo instalar Python: se usa el que trae el programa del ERP." }
+    if ($python) { $pythonDelKit = $true; Ojo "No se pudo instalar Python: se usa el que trae el programa del ERP." }
 }
 if (-not $python) {
     Frenar "No hay Python en este PC y no se pudo instalar solo." @(
@@ -280,6 +275,11 @@ if ($python.version -ne "3.14") {
     $pendientes.Add("Python quedó en $($python.version) y no en 3.14 (el motor se probó con 3.14).")
 }
 Bien "Python $($python.version): $($python.exe)"
+if ($pythonDelKit) {
+    # El entorno del motor queda atado a esa carpeta (su pyvenv.cfg apunta ahi).
+    $pendientes.Add("El motor usa el Python del programa del ERP ($($python.exe)): no muevas ni borres esa " +
+                    "carpeta. Si lo haces, vuelve a correr el instalador.")
+}
 
 $git = Buscar-Git
 if (-not $git) {
@@ -299,7 +299,7 @@ $env:GIT_TERMINAL_PROMPT = "0"
 $env:GCM_INTERACTIVE = "never"
 
 # ================================================================== 2) Código
-Titulo "[2/8] Código del motor"
+Titulo "[2/6] Código del motor"
 if (Dentro-DeOneDrive $destino) {
     Frenar "La carpeta de destino quedó dentro de OneDrive ($destino)." @(
         "OneDrive sincronizaría el entorno de Python y los registros, y rompe el motor.",
@@ -357,7 +357,7 @@ function Motor-Danado {
     if ($h.codigo -ne 0) { return "no tiene una versión completa" }
     $s = Correr $git @("-C", $destino, "status", "--porcelain", "--untracked-files=no")
     if ($s.codigo -ne 0) { return "git no la puede leer: $(($s.salida -split "`n")[0])" }
-    if (-not (Test-Path (Join-Path $destino "scripts\robot_erp.ps1"))) { return "le faltan archivos del motor" }
+    if (-not (Test-Path (Join-Path $destino "scripts\agente_actualizacion.ps1"))) { return "le faltan archivos del motor" }
     return $null
 }
 
@@ -420,15 +420,14 @@ else {
     Clonar-Motor
 }
 $scripts = Join-Path $destino "scripts"
-if (-not (Test-Path (Join-Path $scripts "robot_erp.ps1"))) {
-    Frenar "A la copia del motor de este PC le faltan archivos (scripts\robot_erp.ps1)." @(
+if (-not (Test-Path (Join-Path $scripts "agente_actualizacion.ps1"))) {
+    Frenar "A la copia del motor de este PC le faltan archivos (scripts\agente_actualizacion.ps1)." @(
         "Vuelve a correr el instalador y contesta S cuando pregunte si bajar la última versión.",
         "Si se repite, avísale a quien mantiene el motor.")
 }
-. (Join-Path $scripts "robot_erp.ps1")
 
 # ================================================================= 3) Entorno
-Titulo "[3/8] Entorno de Python del motor (lo que más tarda: 2 a 5 minutos)"
+Titulo "[3/6] Entorno de Python del motor (lo que más tarda: 2 a 5 minutos)"
 $venv = Join-Path $destino "apps\api\.venv"
 $venvPy = Join-Path $venv "Scripts\python.exe"
 $req = Join-Path $destino "apps\api\requirements-motor.txt"
@@ -484,7 +483,7 @@ Armar-Entorno
 $listo.Add("El motor en $destino (Python $($python.version)).")
 
 # ============================================================ 4) Configuración
-Titulo "[4/8] Configuración"
+Titulo "[4/6] Configuración"
 
 # El .env se lee y se escribe en UTF-8 sin BOM, y se conservan las líneas que ya tenía.
 function Leer-Env {
@@ -583,7 +582,7 @@ if (Test-Path $bases) {
     if ($faltan) {
         Ojo "En 'Bases de datos' faltan las carpetas: $($faltan -join ', ')."
         Info "Las crea el programa del ERP la primera vez que baja las tablas: abre su panel.bat y"
-        Info "descarga todo una vez (o usa el acceso 'Actualizar plataforma' cuando termine esto)."
+        Info "descarga todo una vez."
         $pendientes.Add("Bajar las tablas del ERP una vez para que existan stock y Seguimientos de compras.")
     }
     else { Bien "Bases de datos: $bases" }
@@ -623,174 +622,10 @@ Escribir-Env $cfg
 Bien "Configuración guardada en $envFile"
 $cfg = $null; $clave = $null; $secreto = $null
 
-# ======================================================== 5) Programa del ERP
-Titulo "[5/8] Programa que baja las tablas del ERP"
-$robot = $null
-if ($Simular -and $SimularSinRobot) {
-    Sim "Sin programa del ERP."
-}
-elseif ($Simular) {
-    $robot = Join-Path $CarpetaSimulacion "automatizacion"
-    if ($SimularRobotEnOneDrive) {
-        $robot = Join-Path $od "Escritorio\INSTALAR_EN_PC_JEFA\automatizacion"
-        New-Item -ItemType Directory -Force $robot | Out-Null
-        Set-Content (Join-Path (Split-Path $robot -Parent) "automatizacion.zip") "zip de prueba" -Encoding ascii
-        Set-Content (Join-Path $robot ".env") "CLAVE_DE_PRUEBA=ficticia" -Encoding ascii
-    }
-    New-Item -ItemType Directory -Force $robot | Out-Null
-    Set-Content (Join-Path $robot "panel.bat") "@echo off" -Encoding ascii
-    Set-Content (Join-Path $robot "flexline_flows.py") @(
-        "import time",
-        "print('§PC§|0|Descargando de Flexline (simulacion) - NO uses el mouse/teclado')",
-        "time.sleep(2)",
-        "print('LISTO: 7/7 pasos OK (simulacion)')") -Encoding ascii
-    Set-Content (Join-Path $robot "pywinauto.py") "" -Encoding ascii
-    Sim "Programa del ERP de prueba: $robot (no abre Flexline)."
-}
-else {
-    $anterior = (Leer-Env)["ROBOT_ERP_DIR"]
-    $probables = @(Carpetas-RobotProbables)
-    if (Es-CarpetaRobot $anterior) { $probables = @($anterior) + @($probables | Where-Object { $_ -ne $anterior }) }
-    if ($probables.Count -gt 0) {
-        Info "Lo encontré en: $($probables[0])"
-        $r = Read-Host "    ¿Es esa la carpeta del programa? (S/N) [S]"
-        if ($r -eq "" -or $r -match '^[sS]') { $robot = $probables[0] }
-    }
-    if (-not $robot) {
-        Info "Se abre una ventana para elegir la carpeta 'automatizacion' del programa del ERP"
-        Info "(la que tiene panel.bat). Si no aparece, mira detrás de esta ventana."
-        Add-Type -AssemblyName System.Windows.Forms
-        $ventanaPadre = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }
-        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-        $dlg.Description = "Carpeta 'automatizacion' del programa del ERP (la que tiene panel.bat)"
-        $dlg.ShowNewFolderButton = $false
-        if ($probables.Count -gt 0) { $dlg.SelectedPath = $probables[0] }
-        elseif (Test-Path ([Environment]::GetFolderPath("Desktop"))) { $dlg.SelectedPath = [Environment]::GetFolderPath("Desktop") }
-        if ($dlg.ShowDialog($ventanaPadre) -eq [System.Windows.Forms.DialogResult]::OK) { $robot = $dlg.SelectedPath }
-        $ventanaPadre.Dispose()
-    }
-}
-if ($robot -and -not (Es-CarpetaRobot $robot)) {
-    if (Test-Path (Join-Path $robot "panel.bat")) { Ojo "Esa carpeta tiene panel.bat pero no flexline_flows.py: está incompleta." }
-    else { Ojo "Esa carpeta no es la del programa del ERP (no tiene flexline_flows.py)." }
-    $robot = $null
-}
-# El programa guarda en su .env las claves del ERP, y sus registros al lado. Si su
-# carpeta queda dentro de OneDrive (el kit se deja en el Escritorio, y OneDrive suele
-# respaldar el Escritorio), todo eso se sube a la nube. Se copia a una carpeta fuera de
-# OneDrive y se ofrece borrar la de OneDrive y el .zip del kit, que también lo trae.
-if ($robot -and (Dentro-DeOneDrive $robot)) {
-    $fuera = Join-Path $perfil "automatizacion"
-    Ojo "El programa del ERP está dentro de OneDrive: $robot"
-    Info "Su archivo .env tiene las claves del ERP y OneDrive lo sube a la nube, junto con sus registros."
-    $r = if ($Simular) { "S" } else { Read-Host "    ¿Copiarlo a $fuera, fuera de OneDrive? (S/N) [S]" }
-    if ($r -eq "" -or $r -match '^[sS]') {
-        $copiado = $false
-        if ((Test-Path $fuera) -and -not (Es-CarpetaRobot $fuera)) {
-            Ojo "Ya existe $fuera y no es el programa del ERP: no la toco."
-        }
-        else {
-            # robocopy copia todo, también el .env y lo oculto; sale con menos de 8 si
-            # copió bien.
-            $rc = Correr "$env:SystemRoot\System32\robocopy.exe" @($robot, $fuera, "/E", "/R:1", "/W:1",
-                                                                  "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
-            if ($rc.codigo -lt 8) { $copiado = Es-CarpetaRobot $fuera }
-            else { Ojo "No se pudo copiar: $(($rc.salida -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 1))" }
-        }
-        if ($copiado) {
-            $enOneDrive = $robot
-            $robot = $fuera
-            Bien "Copiado a $fuera. Desde ahora el programa (y su panel.bat) está ahí."
-            # Si el entorno del motor se armó con el Python del kit (porque el PC no deja
-            # instalar Python), ese Python es el de la carpeta que se va a borrar: el
-            # entorno se arma de nuevo con el de la copia.
-            $homeVenv = Get-Content (Join-Path $venv "pyvenv.cfg") -ErrorAction SilentlyContinue |
-                        Where-Object { $_ -match '^\s*home\s*=' } |
-                        ForEach-Object { ($_ -replace '^\s*home\s*=\s*', '').Trim() } | Select-Object -First 1
-            $pythonEnKit = Dentro-De $python.exe $enOneDrive
-            if ($pythonEnKit) {
-                $python.exe = Join-Path $fuera $python.exe.Substring($enOneDrive.TrimEnd("\").Length + 1)
-            }
-            if ($pythonEnKit -or ($homeVenv -and (Dentro-De $homeVenv $enOneDrive))) {
-                Info "El motor usaba el Python de esa carpeta: se arma de nuevo su entorno con el de la copia."
-                Armar-Entorno -Rehacer
-            }
-            $zip = Join-Path (Split-Path $enOneDrive -Parent) "automatizacion.zip"
-            $queBorrar = if (Test-Path $zip) { "$enOneDrive y $zip" } else { $enOneDrive }
-            $r = if ($Simular) { "S" } else { Read-Host "    ¿Borrar $queBorrar? Así las claves del ERP dejan de estar en la nube. (S/N) [S]" }
-            if ($r -eq "" -or $r -match '^[sS]') {
-                try {
-                    Remove-Item $enOneDrive -Recurse -Force -ErrorAction Stop
-                    if (Test-Path $zip) { Remove-Item $zip -Force -ErrorAction Stop }
-                    Bien "Borrado de OneDrive: $enOneDrive"
-                }
-                catch {
-                    Ojo "No se pudo borrar todo: $($_.Exception.Message)"
-                    $pendientes.Add("Borrar a mano $queBorrar (tiene las claves del ERP).")
-                }
-            }
-            else { $pendientes.Add("Borrar $($queBorrar): tiene las claves del ERP y OneDrive las sube a la nube.") }
-        }
-        else { $pendientes.Add("Sacar el programa del ERP de OneDrive ($robot): su .env tiene las claves del ERP.") }
-    }
-    else { $pendientes.Add("Sacar el programa del ERP de OneDrive ($robot): su .env tiene las claves del ERP.") }
-}
-if ($robot) {
-    Escribir-Env ([ordered]@{ ROBOT_ERP_DIR = $robot })
-    Bien "Programa del ERP: $robot"
-    $pyRobot = Buscar-PythonRobot $robot
-    if ($pyRobot) { Bien "Su Python está listo: $pyRobot" }
-    else {
-        Ojo "El programa no tiene su Python listo en este PC."
-        Info "Abre esa carpeta, haz doble clic en instalar.bat y espera a que diga TODO LISTO."
-        $pendientes.Add("Correr instalar.bat del programa del ERP.")
-    }
-    Info "El acceso 'Actualizar plataforma' lo corre sin abrir el panel:"
-    Info "  python flexline_flows.py descargar --tablas $TABLAS_ROBOT"
-    Info "Baja stock Curifor y Frontera y los 3 seguimientos en unos 9 minutos, y mientras"
-    Info "tanto maneja el mouse y el teclado."
-}
-else {
-    Ojo "Sin la carpeta del programa del ERP, el acceso 'Actualizar plataforma' no puede bajar las tablas."
-    Info "Lo demás queda instalado: la tarea de las 09:30 calcula con los archivos que haya."
-    $pendientes.Add("Elegir la carpeta del programa del ERP (volver a correr el instalador).")
-}
-
-# =================================================== 6) Acceso del Escritorio
-Titulo "[6/8] Acceso 'Actualizar plataforma' en el Escritorio"
-$lnk = Join-Path $escritorio "Actualizar plataforma.lnk"
-$shell = New-Object -ComObject WScript.Shell
-$acceso = $shell.CreateShortcut($lnk)
-$acceso.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$acceso.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scripts\actualizar_plataforma.ps1`""
-$acceso.WorkingDirectory = $destino
-$acceso.Description = "Baja las tablas del ERP y publica el sugerido de compras"
-$acceso.IconLocation = "$env:SystemRoot\System32\shell32.dll,238"
-$acceso.Save()
-Bien "Acceso creado: $lnk"
-# Sin el programa del ERP el acceso solo diría que no lo encuentra: no cuenta como listo.
-if ($robot) { $listo.Add("El acceso 'Actualizar plataforma' en el Escritorio.") }
-Info "Doble clic cuando quieras dejar la plataforma al día (35 a 45 minutos en total)."
-if ($Simular) {
-    Sim "Prueba del acceso, sin el programa del ERP de verdad (el motor tampoco publica):"
-    # No se corre el motor en la simulación: solo se revisa que el acceso arranque
-    # y encuentre al programa de prueba. El motor oficial nunca corre acá.
-    $pyR = if ($robot) { Buscar-PythonRobot $robot } else { $null }
-    if (-not $robot) { Sim "Sin programa del ERP: no se prueba." }
-    elseif ($pyR) {
-        Push-Location $robot
-        $r = Correr $pyR @("flexline_flows.py", "descargar", "--tablas", $TABLAS_ROBOT)
-        Pop-Location
-        if ($r.codigo -eq 0) { Sim "El programa de prueba corrió: $(($r.salida -split "`n")[-1])" }
-        else { Ojo "El programa de prueba falló: $($r.salida)" }
-    }
-    else { Ojo "No encontré un Python para el programa de prueba." }
-}
-
-# ========================================================= 7) Tareas de Windows
-Titulo "[7/8] Tareas de Windows"
+# ================================================================ 5) Tarea de Windows
+Titulo "[5/6] Tarea de Windows (el agente)"
 $usuario = "$env:USERDOMAIN\$env:USERNAME"
-# Las tareas corren el .ps1 a través de sin_ventana.vbs: con powershell directo,
+# La tarea corre el .ps1 a través de sin_ventana.vbs: con powershell directo,
 # Windows muestra una ventana un instante (con Windows Terminal, la deja abierta), y
 # el agente corre cada minuto: le quitaría el foco al programa del ERP mientras hace
 # clics. Si este PC no deja correr VBScript, se usa powershell oculto.
@@ -809,8 +644,8 @@ if (Test-Path $vbs) {
     catch { $usarVbs = $false }
     Remove-Item $pruebaDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-if ($usarVbs) { Bien "Las tareas van a correr sin abrir ventanas." }
-else { Ojo "Este PC no deja correr VBScript: las tareas van con PowerShell oculto (puede asomar una ventana)." }
+if ($usarVbs) { Bien "La tarea va a correr sin abrir ventanas." }
+else { Ojo "Este PC no deja correr VBScript: la tarea va con PowerShell oculto (puede asomar una ventana)." }
 
 function Accion($script) {
     $ps1 = Join-Path $scripts $script
@@ -820,43 +655,29 @@ function Accion($script) {
     return New-ScheduledTaskAction -Execute "powershell.exe" -WorkingDirectory $destino -Argument (
         "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ps1`"")
 }
-# Como las del PC del dueño: con la sesión de ella iniciada (OneDrive y el programa
-# del ERP solo andan con sesión). Sin "-RunLevel Highest": no hace falta administrador.
+# Como las del PC del dueño: con la sesión de ella iniciada (OneDrive solo anda con
+# sesión). Sin "-RunLevel Highest": no hace falta administrador.
 $principal = New-ScheduledTaskPrincipal -UserId $usuario -LogonType Interactive -RunLevel Limited
 
-# Tope de 2 horas para el motor: una corrida normal son 22 a 35 minutos, pero con
-# reintentos y archivos bajando de OneDrive puede pasar de la hora (la del dueño
-# tiene 1 hora y Windows la cortaría a mitad de la publicación).
+# Nada de lo que se registra acá calcula solo. En el PC del dueño hay una tarea a las
+# 09:30 y otra al iniciar sesión; en este PC el motor corre únicamente cuando alguien
+# aprieta "Actualizar ahora" en la plataforma y el agente toma el pedido.
 $comun = @{ AllowStartIfOnBatteries = $true; DontStopIfGoingOnBatteries = $true; MultipleInstances = "IgnoreNew" }
 if ($Simular) { $comun["Disable"] = $true }
 
-$tDiaria = New-ScheduledTaskTrigger -Daily -At "09:30"
-# Sin zona horaria: New-ScheduledTaskTrigger la anota (-03:00 en el horario de
-# verano) y Windows la toma como "sincronizar entre zonas horarias": desde abril, con
-# -04:00, la tarea correria a las 08:30. La del dueño no tiene zona.
-$tDiaria.StartBoundary = (Get-Date "09:30").ToString("yyyy-MM-dd'T'HH:mm:ss")
-$sDiaria = New-ScheduledTaskSettingsSet @comun -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-
-$tSesion = New-ScheduledTaskTrigger -AtLogOn -User $usuario
-$tSesion.Delay = "PT2M"   # que OneDrive alcance a arrancar
-$sSesion = New-ScheduledTaskSettingsSet @comun -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-
 # El agente: al iniciar sesión y cada minuto, para siempre. 90 minutos de tope: la
-# plataforma espera 75 una corrida del motor.
+# plataforma espera 75 una corrida del motor (con reintentos y archivos bajando de
+# OneDrive una corrida normal de 22 a 35 minutos puede pasar de la hora).
 $tAgente1 = New-ScheduledTaskTrigger -AtLogOn -User $usuario
 $tAgente2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
 $sAgente = New-ScheduledTaskSettingsSet @comun -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 90)
 
 $tareas = @(
-    @{ nombre = $TAREA_DIARIA; script = "tarea_si_no_corrio_hoy.ps1"; disparadores = @($tDiaria); ajustes = $sDiaria
-       descripcion = "Calcula y publica el sugerido a las 09:30 si hoy no se hizo con el acceso 'Actualizar plataforma'." },
-    @{ nombre = $TAREA_SESION; script = "tarea_al_iniciar_sesion.ps1"; disparadores = @($tSesion); ajustes = $sSesion
-       descripcion = "Recupera la corrida diaria del motor si el PC se reinició de madrugada y nadie inició sesión antes de las 09:30." },
     @{ nombre = $TAREA_AGENTE; script = "agente_actualizacion.ps1"; disparadores = @($tAgente1, $tAgente2); ajustes = $sAgente
-       descripcion = "Atiende los botones 'Actualizar ahora' y 'Actualizar motor' de la plataforma." }
+       descripcion = "Atiende los botones 'Actualizar ahora' y 'Actualizar motor' de la plataforma. Nada se calcula solo." }
 )
 if (-not (Leer-Env)["AGENTE_SECRET"]) {
-    Ojo "El agente queda instalado, pero sin su clave no va a atender los botones."
+    Ojo "El agente queda instalado, pero sin su clave no va a atender el botón: el sugerido no se calcula."
 }
 $registradas = @()
 try {
@@ -878,7 +699,7 @@ try {
 }
 catch {
     Mal "No se pudo dejar la tarea '$nombre': $($_.Exception.Message)"
-    $pendientes.Add("Las tareas de Windows no quedaron (ver arriba). Pide ayuda a quien mantiene el motor.")
+    $pendientes.Add("La tarea de Windows no quedó (ver arriba). Pide ayuda a quien mantiene el motor.")
 }
 finally {
     if ($Simular) {
@@ -888,26 +709,27 @@ finally {
     }
 }
 if ($registradas.Count -eq $tareas.Count) {
-    $listo.Add("Las tareas: el sugerido a las 09:30 si no se hizo antes, el rescate al iniciar " +
-               "sesión si el PC se reinició de madrugada, y el agente de los botones.")
+    $listo.Add("La tarea del agente en Windows (cada minuto, con tu sesión iniciada). No hay tareas que calculen solas.")
 }
 if (-not $Simular) {
-    Info "El dueño tenía las mismas tareas en su PC: el día del cambio de PC titular hay que"
-    Info "deshabilitarlas allá (ver docs\instalar-pc-jefa.md)."
+    Info "El PC anterior calcula solo a las 09:30 con tareas de Windows: el día del cambio de PC"
+    Info "titular hay que deshabilitarlas allá (ver docs\instalar-pc-jefa.md)."
 }
 
-# =========================================================== 8) Prueba final
-Titulo "[8/8] Prueba final (no publica nada)"
+# =========================================================== 6) Prueba final
+Titulo "[6/6] Prueba final (no publica nada)"
 $cfgFinal = Leer-Env
 $apiFinal = $cfgFinal["PLATAFORMA_API_URL"]
 Info "Qué archivo leería el motor de cada tabla, y aviso a la pantalla Fuentes de datos..."
 Push-Location (Join-Path $destino "apps\api")
 $env:PYTHONIOENCODING = "utf-8"
 $probar = Correr $venvPy @("-m", "src.motor.config_fuentes", "--probar", "--reportar") -Mostrar
+# Solo si el motor dice que este PC no publica se le pide a un admin que lo deje titular:
+# al reinstalar en el PC que ya lo es, ese pedido estaba de más.
+$noPublica = [bool]($probar.salida -match 'este PC NO publica')
 # --probar no guarda nada. Sin la configuración guardada en este PC, si en su primera
-# corrida de las 09:30 la plataforma no respondía (Render despertando o reiniciándose),
-# el motor no sabía quién es el titular, se creía titular y publicaba a la misma hora
-# que el PC titular, con sus propios archivos.
+# corrida la plataforma no respondía (Render despertando o reiniciándose), el motor no
+# sabía quién es el titular, se creía titular y publicaba con sus propios archivos.
 $guardada = Correr $venvPy @("-m", "src.motor.config_fuentes", "--guardar-config")
 Pop-Location
 if ($guardada.codigo -eq 0) {
@@ -922,7 +744,8 @@ else {
 }
 if ($probar.codigo -eq 0 -and $probar.salida -match 'Reporte enviado a la plataforma') {
     Bien "La plataforma recibió la prueba: este PC ya aparece en Cargar > Fuentes de datos."
-    $listo.Add("Este PC aparece en Fuentes de datos (todavía no es el titular: no publica).")
+    $listo.Add($(if ($noPublica) { "Este PC aparece en Fuentes de datos (todavía no es el titular: no publica)." }
+                 else { "Este PC aparece en Fuentes de datos." }))
 }
 elseif ($probar.codigo -eq 0) {
     Ojo "La prueba corrió, pero no se pudo avisar a la plataforma (revisa la clave de la cuenta del motor)."
@@ -983,10 +806,20 @@ if ($pendientes.Count -gt 0) {
     foreach ($p in ($pendientes | Select-Object -Unique)) { Write-Host "  $i. $p" -ForegroundColor Yellow; $i++ }
 }
 Write-Host "`nQué hacer ahora:" -ForegroundColor Cyan
-Write-Host "  1. Pídele a un admin que, en la plataforma (Cargar > Fuentes de datos), deje este PC"
-Write-Host "     como titular. Hasta entonces este PC calcula pero no publica."
-Write-Host "  2. El mismo día, en el PC anterior, hay que deshabilitar sus tareas del motor."
-Write-Host "  3. Ese día, haz doble clic en 'Actualizar plataforma' y revisa que termine en LISTO."
-Write-Host "`nEste PC tiene que quedar prendido y con tu sesión iniciada en los días de trabajo."
+if ($noPublica) {
+    Write-Host "  1. Pídele a un admin que, en la plataforma (Cargar > Fuentes de datos), deje este PC"
+    Write-Host "     como titular. Hasta entonces este PC no publica."
+    Write-Host "  2. El mismo día, en el PC anterior, hay que deshabilitar sus tareas del motor."
+    Write-Host "  3. Ese día, entra a la plataforma (Portada, o Cargar datos si eres admin), aprieta"
+    Write-Host "     'Actualizar ahora' y revisa que la tarjeta termine en 'Listo' (tarda entre 25 y 40 minutos)."
+}
+else {
+    Write-Host "  - Mira en Cargar > Fuentes de datos si este PC es el titular: solo el titular publica."
+    Write-Host "  - Para probar, entra a la plataforma (Portada, o Cargar datos si eres admin), aprieta"
+    Write-Host "    'Actualizar ahora' y revisa que la tarjeta termine en 'Listo' (tarda entre 25 y 40 minutos)."
+}
+Write-Host "`nNada se calcula solo: cada día hábil, después de bajar las tablas del ERP, hay que apretar"
+Write-Host "'Actualizar ahora'. Este PC tiene que estar prendido, sin suspender y con tu sesión iniciada"
+Write-Host "en ese momento; si no, a los 5 minutos la tarjeta dice 'Nadie tomó la solicitud'."
 Write-Host "Registros: $destino\logs"
 Salir 0

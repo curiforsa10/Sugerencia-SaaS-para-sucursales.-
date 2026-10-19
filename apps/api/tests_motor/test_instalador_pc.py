@@ -3,12 +3,12 @@
 Corre el script de verdad con el PowerShell de Windows en una carpeta temporal: no
 instala programas, no pide claves y no llama a la plataforma (apunta a un puerto de
 127.0.0.1 donde no hay nada). El motor se clona desde un "GitHub" armado en la carpeta
-del test (un repositorio bare) con lo minimo: robot_erp.ps1, requirements-motor.txt y
-un config_fuentes.py falso que anota que lo llamaron. Las librerias del motor son
+del test (un repositorio bare) con lo minimo: un agente_actualizacion.ps1 de mentira,
+requirements-motor.txt y un config_fuentes.py falso que anota que lo llamaron. Las librerias del motor son
 paquetes vacios con su nombre, y pip no puede salir a internet (PIP_NO_INDEX).
 
-Las corridas completas registran las tres tareas de Windows con el prefijo "PRUEBA-",
-deshabilitadas, y el mismo instalador las borra al terminar (como en -Simular a mano).
+Las corridas completas registran la tarea del agente de Windows con el prefijo "PRUEBA-",
+deshabilitada, y el mismo instalador la borra al terminar (como en -Simular a mano).
 
 Lo que cuida:
 - Una copia del motor que quedo a medias (se corto la descarga) se aparta y se baja
@@ -18,7 +18,9 @@ Lo que cuida:
 - Si no se puede instalar Python, se usa el portable del programa del ERP.
 - La configuracion de Fuentes de datos queda guardada al final.
 - El resumen dice solo lo que de verdad quedo.
-- El programa del ERP se saca de OneDrive (su .env tiene las claves del ERP).
+- En el PC de la jefa nada calcula solo: la unica tarea es la del agente, que atiende el
+  boton. No hay tarea de las 09:30 ni de al iniciar sesion.
+- El programa del ERP ya funciona: el instalador no lo copia, no lo borra ni lo anota.
 """
 import os
 import pathlib
@@ -56,6 +58,8 @@ if "--guardar-config" in sys.argv:
         sys.exit(1)
     print("Configuracion de fuentes en este PC (plataforma): modo prueba, titular PC anterior.")
     sys.exit(0)
+if os.environ.get("INSTALADOR_CONFIG_NO_PUBLICA"):
+    print("  -> este PC NO publica: no es el titular (PC anterior).")
 print("Reporte enviado a la plataforma (tipo probar).")
 """
 
@@ -110,7 +114,7 @@ def origen(tmp_path_factory):
     _git(base, "clone", "-q", str(github), str(publica))
     _git(publica, "checkout", "-q", "-b", "principal")
     (publica / "scripts").mkdir()
-    shutil.copy2(SCRIPTS / "robot_erp.ps1", publica / "scripts" / "robot_erp.ps1")
+    (publica / "scripts" / "agente_actualizacion.ps1").write_text("# agente de prueba\n")
     api = publica / "apps" / "api"
     (api / "src" / "motor").mkdir(parents=True)
     (api / "requirements-motor.txt").write_text("".join(f"{n}\n" for n in _LIBRERIAS))
@@ -205,7 +209,7 @@ def test_una_copia_cortada_a_mitad_se_aparta_y_se_baja_de_nuevo(tmp_path, origen
     """Se cerro la ventana mientras decia "Bajando el código": quedo un .git sin la
     version. Antes el instalador decia "Ya está", despues "hay archivos cambiados a
     mano" (git status respondio 'bad object HEAD') y se caia con un error rojo al
-    cargar robot_erp.ps1, en cada reintento."""
+    revisar los scripts, en cada reintento."""
     sim = tmp_path / "sim"
     destino = _destino(sim)
     _git(tmp_path, "init", "-q", "-b", "principal", str(destino))
@@ -220,7 +224,7 @@ def test_una_copia_cortada_a_mitad_se_aparta_y_se_baja_de_nuevo(tmp_path, origen
     # Paso el paso 2 y frena en el 3 porque esa rama de prueba no trae requirements.
     assert "no trae requirements-motor.txt" in r.stdout
     assert _git(destino, "rev-parse", "--abbrev-ref", "HEAD") == "sin-requisitos"
-    assert (destino / "scripts" / "robot_erp.ps1").exists()
+    assert (destino / "scripts" / "agente_actualizacion.ps1").exists()
     apartadas = list(destino.parent.glob("Sugerencia-SaaS-para-sucursales-danada-*"))
     assert len(apartadas) == 1 and (apartadas[0] / "README.md").exists()
     assert (destino / ".env").read_text() == "PLATAFORMA_EMAIL=motor@ejemplo.cl\n", "no se pierden las claves"
@@ -276,63 +280,117 @@ def test_un_entorno_sin_pip_se_repara_y_la_configuracion_queda_guardada(tmp_path
 
 
 def test_el_resumen_dice_solo_lo_que_quedo(tmp_path, origen):
-    """Sin programa del ERP el acceso del Escritorio no puede bajar las tablas: no va en
-    "Quedó listo". Y si la configuracion de Fuentes de datos no se pudo traer, va en
-    "Falta"."""
+    """Si la configuracion de Fuentes de datos no se pudo traer, va en "Falta". Y el
+    resumen no promete nada del programa del ERP ni de un acceso del Escritorio: el
+    instalador ya no los toca."""
     sim = _clonado(tmp_path, origen, "venv-pip-falso")
 
-    r = _instalar(sim, origen, "-SimularSinRobot",
-                  entorno=_entorno(tmp_path, origen, INSTALADOR_CONFIG_FALLA="1"))
+    r = _instalar(sim, origen, entorno=_entorno(tmp_path, origen, INSTALADOR_CONFIG_FALLA="1"))
 
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
     listo, falta = _resumen(r.stdout)
-    assert not any("Actualizar plataforma" in l for l in listo), listo
     assert any(l.startswith("- El motor en ") for l in listo), listo
-    assert any(l.startswith("- Las tareas:") for l in listo), listo
-    assert any("Elegir la carpeta del programa del ERP" in l for l in falta), falta
+    assert any(l.startswith("- La tarea del agente") for l in listo), listo
+    assert not any("Actualizar plataforma" in l for l in listo), listo
+    assert not any("programa del ERP" in l for l in falta), falta
     assert any("guarde la configuración de Fuentes de datos" in l for l in falta), falta
+    assert "Actualizar plataforma" not in r.stdout
+    assert "[6/6] Prueba final" in r.stdout
 
 
-def test_el_programa_del_erp_se_saca_de_onedrive(tmp_path, origen):
-    """El kit queda en el Escritorio y OneDrive suele respaldar el Escritorio: el .env
-    del programa, con las claves del ERP, y sus registros se subian a la nube."""
+def test_el_resumen_pide_dejar_el_pc_como_titular_solo_si_no_lo_es(tmp_path, origen):
+    """El pedido de "deje este PC como titular" sale solo cuando el motor dice que no
+    publica. Al reinstalar en el PC que ya lo es, estaba de mas."""
     sim = _clonado(tmp_path, origen, "venv-pip-falso")
-    kit = sim / "perfil" / "OneDrive - Curifor S.A" / "Escritorio" / "INSTALAR_EN_PC_JEFA"
-    fuera = sim / "perfil" / "automatizacion"
+    r = _instalar(sim, origen, entorno=_entorno(tmp_path, origen, INSTALADOR_CONFIG_NO_PUBLICA="1"))
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    listo, _ = _resumen(r.stdout)
+    assert any("todavía no es el titular" in l for l in listo), listo
+    assert "Pídele a un admin que" in r.stdout
 
-    r = _instalar(sim, origen, "-SimularRobotEnOneDrive", entorno=_entorno(tmp_path, origen))
+
+def test_si_el_motor_no_dice_que_no_publica_el_resumen_no_pide_dejarlo_titular(tmp_path, origen):
+    sim = _clonado(tmp_path, origen, "venv-pip-falso")
+    r = _instalar(sim, origen, entorno=_entorno(tmp_path, origen))
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    listo, _ = _resumen(r.stdout)
+    assert not any("todavía no es el titular" in l for l in listo), listo
+    assert "Pídele a un admin que" not in r.stdout
+    assert "si este PC es el titular" in r.stdout
+
+
+def test_el_instalador_solo_registra_la_tarea_del_agente():
+    """Prueba estatica: si alguien vuelve a poner una tarea que calcule sola, el texto
+    del script la delata aunque la simulacion no la ejerza."""
+    texto = (SCRIPTS / "instalar_pc_jefa.ps1").read_text(encoding="utf-8-sig")
+    assert texto.count("Register-ScheduledTask") == 1
+    for viejo in ("tarea_diaria", "tarea_si_no_corrio_hoy", "tarea_al_iniciar_sesion", "CreateShortcut",
+                  "ROBOT_ERP_DIR", "New-ScheduledTaskTrigger -Daily"):
+        assert viejo not in texto, viejo
+
+
+def test_no_deja_ninguna_tarea_que_calcule_sola(tmp_path, origen):
+    """En el PC de la jefa el sugerido se calcula cuando alguien aprieta el boton. La
+    unica tarea es el agente (pregunta a la plataforma cada minuto): sin el disparador
+    diario de las 09:30 y sin la tarea de al iniciar sesion que recupera la corrida."""
+    sim = _clonado(tmp_path, origen, "venv-pip-falso")
+
+    r = _instalar(sim, origen, entorno=_entorno(tmp_path, origen))
 
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
-    assert "El programa del ERP está dentro de OneDrive" in r.stdout
-    assert (fuera / "flexline_flows.py").exists()
-    assert (fuera / ".env").read_text().strip() == "CLAVE_DE_PRUEBA=ficticia"
-    assert not (kit / "automatizacion").exists()
-    assert not (kit / "automatizacion.zip").exists()
-    env = (_destino(sim) / ".env").read_text(encoding="utf-8")
-    assert re.search(rf"(?m)^ROBOT_ERP_DIR={re.escape(str(fuera))}$", env), env
-    assert "se arma de nuevo su entorno" not in r.stdout, "el motor no usaba ese Python"
+    xmls = sorted(p.name for p in (sim / "tareas").glob("*.xml"))
+    assert xmls == ["Sugerido Curifor - Agente.xml"], xmls
+    xml = (sim / "tareas" / xmls[0]).read_text(encoding="utf-8-sig")
+    assert "agente_actualizacion.ps1" in xml
+    assert "<LogonTrigger>" in xml and "<TimeTrigger>" in xml
+    assert "<CalendarTrigger>" not in xml, "no hay disparador diario"
+    assert "tarea_si_no_corrio_hoy" not in xml and "tarea_diaria" not in xml
+    assert not (sim / "perfil" / "Escritorio" / "Actualizar plataforma.lnk").exists()
+    assert "[5/6] Tarea de Windows (el agente)" in r.stdout
+    assert "Tareas de prueba borradas" in r.stdout
 
 
-def test_si_el_motor_usaba_el_python_del_kit_en_onedrive_queda_con_el_de_la_copia(tmp_path, origen):
-    """Las dos cosas juntas, que es lo probable en el PC de ella si bloquea instaladores
-    y OneDrive respalda el Escritorio: el entorno del motor se arma con el Python del kit,
-    y despues esa carpeta se borra de OneDrive. Sin rearmarlo, el motor quedaba sin
-    Python."""
+def test_no_toca_el_programa_del_erp_aunque_este_en_onedrive(tmp_path, origen):
+    """El programa del ERP de la jefa ya funciona. Aunque el kit este en un Escritorio que
+    OneDrive respalda, el instalador no lo copia, no lo borra ni lo anota en el .env."""
+    sim = _clonado(tmp_path, origen, "venv-pip-falso")
+    kit = sim / "perfil" / "OneDrive - Curifor S.A" / "Escritorio" / "INSTALAR_EN_PC_JEFA" / "automatizacion"
+    kit.mkdir(parents=True)
+    (kit / "panel.bat").write_text("@echo off")
+    (kit / "flexline_flows.py").write_text("print('no se corre')")
+    (kit / ".env").write_text("CLAVE_DE_PRUEBA=ficticia")
+    zip_kit = kit.parent / "automatizacion.zip"
+    zip_kit.write_text("zip de prueba")
+
+    r = _instalar(sim, origen, entorno=_entorno(tmp_path, origen))
+
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    assert (kit / "flexline_flows.py").exists() and (kit / "panel.bat").exists()
+    assert (kit / ".env").read_text() == "CLAVE_DE_PRUEBA=ficticia"
+    assert zip_kit.exists()
+    assert not (sim / "perfil" / "automatizacion").exists(), "no se copia a otra carpeta"
+    assert "ROBOT_ERP_DIR" not in (_destino(sim) / ".env").read_text(encoding="utf-8")
+    assert "dentro de OneDrive" not in r.stdout
+
+
+def test_si_el_motor_usa_el_python_del_kit_en_onedrive_el_kit_queda_donde_esta(tmp_path, origen):
+    """El PC bloquea instaladores y el kit del programa del ERP esta en un Escritorio que
+    OneDrive respalda: el entorno del motor se arma con el Python del kit y esa carpeta no
+    se mueve ni se borra (antes se copiaba afuera y se rearmaba el entorno)."""
     sim = tmp_path / "sim"
     kit = sim / "perfil" / "OneDrive - Curifor S.A" / "Escritorio" / "INSTALAR_EN_PC_JEFA" / "automatizacion"
-    fuera = sim / "perfil" / "automatizacion"
     _python_portable(kit / "python")
 
-    r = _instalar(sim, origen, "-SimularRobotEnOneDrive", entorno=_sin_python(tmp_path, origen))
+    r = _instalar(sim, origen, entorno=_sin_python(tmp_path, origen))
 
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
     assert "se usa el que trae el programa del ERP" in r.stdout
-    assert "se arma de nuevo su entorno con el de la copia" in r.stdout
-    assert not kit.exists()
-    cfg = (_destino(sim) / "apps" / "api" / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8")
-    assert str(kit) not in cfg, cfg
+    assert "se arma de nuevo su entorno" not in r.stdout
+    assert (kit / "python" / "python.exe").exists()
+    # El entorno queda atado a esa carpeta: el resumen lo dice en "Falta".
+    _, falta = _resumen(r.stdout)
+    assert any("no muevas ni borres esa carpeta" in l for l in falta), falta
     venv_py = _destino(sim) / "apps" / "api" / ".venv" / "Scripts" / "python.exe"
     prueba = subprocess.run([venv_py, "-c", "import polars, fastexcel, openpyxl, httpx, truststore; print('ok')"],
                             capture_output=True, text=True)
     assert prueba.stdout.strip() == "ok", prueba.stderr
-    assert (fuera / "python" / "python.exe").exists()

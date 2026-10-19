@@ -3,7 +3,7 @@
 #
 #  El programa (un robot sobre Flexline, carpeta "automatizacion" con panel.bat y
 #  flexline_flows.py) no es parte de este repositorio: lo instalo un kit aparte en
-#  el PC. Lo cargan instalar_pc_jefa.ps1 y actualizar_plataforma.ps1:
+#  el PC. Lo carga actualizar_plataforma.ps1 (instalar_pc_jefa.ps1 ya no lo usa):
 #    . "$PSScriptRoot\robot_erp.ps1"
 #
 #  Sin ventana del panel: se llama al subcomando que usan los botones del panel,
@@ -25,9 +25,9 @@ function Es-CarpetaRobot($dir) {
     return [bool]($dir -and (Test-Path (Join-Path $dir "flexline_flows.py")))
 }
 
-# Las carpetas donde suele quedar el programa, que existan y lo tengan. La primera es
-# adonde lo copia el instalador cuando lo encuentra dentro de OneDrive. Si se agrega una,
-# va también en Carpetas-KitRobot de instalar_pc_jefa.ps1.
+# Las carpetas donde suele quedar el programa, que existan y lo tengan. La primera era
+# adonde lo copiaba el instalador (ya no lo hace). Si se agrega una, va también en
+# Carpetas-KitRobot de instalar_pc_jefa.ps1, que la usa para encontrar el Python del kit.
 function Carpetas-RobotProbables {
     $escritorio = [Environment]::GetFolderPath("Desktop")
     $documentos = [Environment]::GetFolderPath("MyDocuments")

@@ -9,12 +9,13 @@
 #       25 a 35 minutos; ahí ya se puede usar el PC.
 #  La ventana muestra el avance y al final dice qué pasó y qué hacer.
 #
-#  Como deja la línea RESULTADO en el log del día, la tarea de las 09:30
-#  (tarea_si_no_corrio_hoy.ps1) ya no calcula otra vez si salió bien; si falló, la
-#  vuelve a intentar.
+#  Como deja la línea RESULTADO en el log del día, la tarea de las 09:30 del PC del
+#  dueño (tarea_si_no_corrio_hoy.ps1) ya no calcula otra vez si salió bien; si falló,
+#  la vuelve a intentar.
 #
-#  Lo deja en el Escritorio instalar_pc_jefa.ps1. La carpeta del programa del ERP
-#  sale del .env (ROBOT_ERP_DIR).
+#  YA NO lo deja instalar_pc_jefa.ps1: en el PC de la jefa el motor corre solo con el
+#  botón de la plataforma, y su programa del ERP lo corre ella. Queda para quien lo
+#  cree a mano; la carpeta del programa sale del .env (ROBOT_ERP_DIR).
 #
 #  Va en UTF-8 con BOM: los textos de pantalla llevan tildes.
 # ============================================================

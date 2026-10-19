@@ -465,6 +465,82 @@ def test_el_error_del_motor_llega_con_sus_tildes(pc, plataforma):
     assert motor[-1] == "RESULTADO: FALLO (codigo 1, agente)"
 
 
+def _motor_frenado(archivos, bloque="Archivos vencidos"):
+    """Un motor falso que frena como el de verdad: ERROR por stderr y, debajo, el bloque
+    con un archivo por linea."""
+    texto = "\n".join([
+        "ERROR: No se carga a produccion con archivos desactualizados.",
+        f"{bloque}:", *[f"  - {a}" for a in archivos], "",
+        "Actualizalos en la carpeta de datos, o corre con --ignorar-frescura si sabes que asi corresponde."]) + "\n"
+    return f"import sys\nsys.stderr.write({texto!r})\nsys.exit(1)\n"
+
+
+def test_si_faltan_archivos_o_estan_viejos_dice_cuales_y_que_hacer(pc, plataforma):
+    """Con el boton como unica forma de actualizar, "ERROR: No se carga a produccion con
+    archivos desactualizados." no le decia a quien lo aprieta ni cuales ni que hacer."""
+    viejos = ["Stock bodegas.xlsx: 3 dias habiles (se espera al dia cada 2)",
+              "Seguimiento nacional.xlsx: 4 dias habiles (se espera al dia cada 2)"]
+    pc.venv(motor=_motor_frenado(viejos))
+    sid = plataforma.pedir("recalcular")
+
+    pc.agente()
+
+    r = plataforma.reporte(sid)
+    assert r["ok"] is False
+    assert r["mensaje"] == (
+        f"No se publicó nada: faltan archivos o están desactualizados ({viejos[0]}; {viejos[1]}). "
+        "Baja las tablas del ERP con su programa y vuelve a apretar el botón.")
+    # Sigue quedando en el log del dia como una corrida que fallo.
+    assert pc.log_motor.read_text(encoding="utf-8-sig").splitlines()[-1] == "RESULTADO: FALLO (codigo 1, agente)"
+
+
+def test_con_muchos_archivos_frenados_nombra_tres_y_cuenta_el_resto(pc, plataforma):
+    """Con Fuentes de datos activa el bloque se llama "Problemas:" y puede traer muchos."""
+    pc.venv(motor=_motor_frenado([f"fuente_{n}: sin archivo" for n in range(1, 6)], bloque="Problemas"))
+    sid = plataforma.pedir("recalcular")
+
+    pc.agente()
+
+    r = plataforma.reporte(sid)
+    assert r["ok"] is False
+    assert r["mensaje"] == (
+        "No se publicó nada: faltan archivos o están desactualizados "
+        "(fuente_1: sin archivo; fuente_2: sin archivo; fuente_3: sin archivo; y 2 más). "
+        "Revisa los archivos en Fuentes de datos (o avisa a un admin) y vuelve a apretar el botón.")
+
+
+def test_los_archivos_largos_se_acortan_pero_el_y_n_mas_se_conserva(pc, plataforma):
+    """Antes el recorte venia despues de sumar el "y N más" y se lo comia."""
+    viejos = [f"seguimiento_de_compras_importado_{n}_con_un_nombre_larguisimo.xlsx: {n + 3} dias habiles "
+              f"(se espera al dia cada 2)" for n in range(1, 5)]
+    pc.venv(motor=_motor_frenado(viejos))
+    sid = plataforma.pedir("recalcular")
+
+    pc.agente()
+
+    r = plataforma.reporte(sid)
+    cortos = [v if len(v) <= 90 else v[:89] + "…" for v in viejos[:3]]
+    assert r["mensaje"] == (
+        f"No se publicó nada: faltan archivos o están desactualizados ({'; '.join(cortos)}; y 1 más). "
+        "Baja las tablas del ERP con su programa y vuelve a apretar el botón.")
+
+
+def test_un_archivo_viejo_que_solo_avisa_no_se_confunde_con_el_motivo(pc, plataforma):
+    """El motor imprime DESACTUALIZADO tambien para los archivos que solo avisan. Si la
+    carga falla por otra cosa, el mensaje es el de esa falla y no "baja las tablas"."""
+    pc.venv(motor="import sys\n"
+                  "print('  DESACTUALIZADO: lista_erp.xlsx: 9 dias habiles (se espera al dia cada 7) - no frena la carga')\n"
+                  "print('ERROR: La plataforma rechazo la carga (HTTP 502)', file=sys.stderr)\n"
+                  "sys.exit(1)\n")
+    sid = plataforma.pedir("recalcular")
+
+    pc.agente()
+
+    r = plataforma.reporte(sid)
+    assert r["ok"] is False
+    assert r["mensaje"] == "ERROR: La plataforma rechazo la carga (HTTP 502)"
+
+
 def test_en_un_pc_que_no_es_el_titular_no_pide_volver_a_apretar(pc, plataforma):
     """El PC nuevo ya tiene el agente, pero el titular sigue siendo el anterior: es el
     unico agente, asi que volver a apretar daria siempre lo mismo."""

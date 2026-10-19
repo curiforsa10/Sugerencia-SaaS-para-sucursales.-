@@ -57,6 +57,43 @@ def test_un_pc_que_no_es_el_titular_se_reconoce(tmp_path):
     assert _llamar(tmp_path, "Titular-SiNoPublico", PUBLICO) == "<nulo>"
 
 
+VENCIDOS = [
+    "  DESACTUALIZADO: Stock bodegas.xlsx: 3 dias habiles (se espera al dia cada 2)",
+    "ERROR: No se carga a produccion con archivos desactualizados.",
+    "Archivos vencidos:",
+    "  - Stock bodegas.xlsx: 3 dias habiles (se espera al dia cada 2)",
+    "  - Seguimiento nacional.xlsx: 4 dias habiles (se espera al dia cada 2)",
+    "",
+    "Actualizalos en la carpeta de datos, o corre con --ignorar-frescura si sabes que asi corresponde.",
+]
+
+
+def test_los_archivos_que_frenaron_la_carga_se_listan(tmp_path):
+    """Los lee el agente para decirle a quien aprieta el boton que bajar. Solo cuenta el
+    bloque que sigue al ERROR: la linea DESACTUALIZADO tambien sale para los archivos
+    que solo avisan, y esos no son el motivo de una falla cualquiera."""
+    assert _llamar(tmp_path, "Archivos-Frenados", VENCIDOS).splitlines() == [
+        "Stock bodegas.xlsx: 3 dias habiles (se espera al dia cada 2)",
+        "Seguimiento nacional.xlsx: 4 dias habiles (se espera al dia cada 2)"]
+    con_fuentes = [l.replace("Archivos vencidos:", "Problemas:") for l in VENCIDOS]
+    assert _llamar(tmp_path, "Archivos-Frenados", con_fuentes).splitlines()[0].startswith("Stock bodegas.xlsx")
+    solo_avisa = PUBLICO + ["  DESACTUALIZADO: lista_erp.xlsx: 9 dias habiles (se espera al dia cada 7) - no frena la carga"]
+    assert _llamar(tmp_path, "Archivos-Frenados", solo_avisa) == "<nulo>"
+    assert _llamar(tmp_path, "Archivos-Frenados", NO_TITULAR) == "<nulo>"
+
+
+def test_las_lineas_de_stdout_en_medio_del_bloque_no_cortan_la_lista(tmp_path):
+    """Python vacia stdout recien al salir y PowerShell lee las dos corrientes por
+    separado: una linea de stdout puede caer entre los archivos de stderr (pasaba en 4 de
+    cada 60 corridas reales) y la lista salia incompleta."""
+    mezclada = [VENCIDOS[0], VENCIDOS[1], VENCIDOS[2], VENCIDOS[3],
+                "  incidencia dejada en la plataforma (los admin ven la campanita).",
+                VENCIDOS[4], "", VENCIDOS[6]]
+    assert _llamar(tmp_path, "Archivos-Frenados", mezclada).splitlines() == [
+        "Stock bodegas.xlsx: 3 dias habiles (se espera al dia cada 2)",
+        "Seguimiento nacional.xlsx: 4 dias habiles (se espera al dia cada 2)"]
+
+
 def test_las_filas_sin_la_linea_de_carga_no_revientan(tmp_path):
     """Antes: `.Matches.Groups[1]` sobre un resultado nulo, que con "Stop" lanzaba
     "No se puede indizar en una matriz nula" y ese texto llegaba a la tarjeta."""

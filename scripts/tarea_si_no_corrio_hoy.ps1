@@ -1,9 +1,10 @@
 ﻿# ============================================================
 #  tarea_si_no_corrio_hoy.ps1 - La corrida de las 09:30, sin repetir
 #
-#  Lo corren la tarea "Sugerido Curifor - Motor diario" en el PC de la jefa (la deja
-#  instalar_pc_jefa.ps1) y tarea_al_iniciar_sesion.ps1 en los dos PCs. Lanza
-#  tarea_diaria.ps1 SOLO si:
+#  Lo corre tarea_al_iniciar_sesion.ps1 (la tarea "Sugerido Curifor - Motor al iniciar
+#  sesion" del PC del dueño). instalar_pc_jefa.ps1 YA NO registra esta tarea ni la de
+#  las 09:30: en el PC de la jefa el motor solo corre cuando se aprieta "Actualizar
+#  ahora" (agente_actualizacion.ps1). Lanza tarea_diaria.ps1 SOLO si:
 #    - hoy no hubo una corrida que saliera bien: la ultima linea RESULTADO del log
 #      del dia (logs\motor_<fecha>.log) no es OK. El acceso del Escritorio
 #      "Actualizar plataforma" y el boton "Actualizar ahora" de la web (el agente)
