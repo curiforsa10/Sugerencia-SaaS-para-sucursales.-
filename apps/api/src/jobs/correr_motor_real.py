@@ -105,9 +105,9 @@ def _credenciales() -> tuple[str, str | None, str | None]:
 # corrida, mas uno por cada lote del feed del ERP-, y el 21-09-2026 Render
 # devolvio 429 (Too Many Requests) al login despues de un 502: desde ahi
 # fallaron InStock, compras y el recalculo, y ni la incidencia se pudo dejar.
-# Ahora se entra una vez y se reutiliza; si la plataforma responde 401 (por
-# ejemplo, un deploy a mitad de corrida invalido las sesiones) se vuelve a
-# entrar una sola vez.
+# Ahora se entra una vez y se reutiliza. Todo reintento llama antes a
+# `olvidar_token()` y entra de nuevo: si la plataforma se reinicio (un deploy o
+# una caida), la sesion de antes ya no vale y responde 401.
 _TOKEN: dict[str, str | None] = {"valor": None}
 
 
@@ -1507,6 +1507,14 @@ _FALLOS: list[dict] = []
 REINTENTOS = 3
 ESPERA_BASE_SEG = 15
 
+# La carga del sugerido tiene un intento mas. En los logs del 29-09, 30-09 y
+# 02-10-2026 la plataforma recien volvio en el tercer intento, 45 s despues del
+# 502 y con un 503 entremedio: no quedaba margen si el reinicio tardaba un poco
+# mas. El cuarto suma 45 s (90 en total). Los timeouts no ganan ese intento: cada
+# uno ya espero 900 s con el servidor cargando por detras, y uno mas dejaria la
+# corrida sobre la hora que le da la tarea de Windows.
+REINTENTOS_CARGA = 4
+
 # Sintomas de "la infraestructura esta levantandose", no de un error del dato.
 _TRANSITORIOS = (
     "502", "503", "504", "Bad Gateway", "Service Unavailable", "Gateway Timeout",
@@ -1589,6 +1597,10 @@ def avisar_falla(motivo: str, detalle: str = "") -> bool:
     if not email or not password:
         return False
     hoy = date.today()
+    # Se avisa justo despues de un fallo, y el fallo mas comun es un reinicio de
+    # la plataforma: el token de la corrida ya no vale. Con el viejo, la
+    # incidencia daba 401 y los admin no se enteraban (29-09, 30-09 y 02-10-2026).
+    olvidar_token()
     try:
         with httpx.Client(timeout=60) as c:
             token = _token(c, base, email, password)
@@ -1620,18 +1632,25 @@ def enviar(csv_path: Path, oficial: bool = False) -> dict:
     proteccion: el 03-09-2026 la corrida murio con un 502 en
     `/api/admin/cargar-sugerido` mientras Render despertaba, y quedo todo el dia
     con el dato de ayer.
+
+    Cada reintento entra de nuevo a la plataforma. Antes reintentaba con el token
+    del inicio de la corrida: si el 502 era Render reiniciandose, al volver la
+    sesion ya no valia y el ultimo intento daba 401. Asi se perdio el sugerido
+    del 29-09, el 30-09 y el 02-10-2026 (502, 503, 401 en los tres logs).
     """
     ultimo: Exception | None = None
-    for intento in range(1, REINTENTOS + 1):
+    for intento in range(1, REINTENTOS_CARGA + 1):
         try:
             return _enviar_una_vez(csv_path, oficial)
         except Exception as e:  # noqa: BLE001
             ultimo = e
-            if not _es_transitorio(e) or intento == REINTENTOS:
+            tope = REINTENTOS if "Timeout" in type(e).__name__ else REINTENTOS_CARGA
+            if not _es_transitorio(e) or intento >= tope:
                 raise
             espera = ESPERA_BASE_SEG * intento
             print(f"  la plataforma no respondio ({e}); reintentando la carga en "
-                  f"{espera}s (intento {intento + 1} de {REINTENTOS})...")
+                  f"{espera}s (intento {intento + 1} de {tope})...")
+            olvidar_token()
             time.sleep(espera)
     raise ultimo  # pragma: no cover - el for siempre sale por return o raise
 

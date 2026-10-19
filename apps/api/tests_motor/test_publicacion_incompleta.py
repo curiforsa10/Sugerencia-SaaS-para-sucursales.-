@@ -218,4 +218,145 @@ def test_si_la_plataforma_no_vuelve_la_carga_falla(monkeypatch, tmp_path):
 
     with pytest.raises(httpx.HTTPStatusError):
         motor.enviar(tmp_path / "x.csv", oficial=True)
+    assert intentos["n"] == motor.REINTENTOS_CARGA
+
+
+def test_un_timeout_de_la_carga_no_gana_el_cuarto_intento(monkeypatch, tmp_path):
+    """Cada timeout ya espero 900 s con el servidor cargando por detras: un intento
+    mas dejaria la corrida sobre la hora que le da la tarea de Windows."""
+    intentos = {"n": 0}
+
+    def falso(csv_path, oficial=False):
+        intentos["n"] += 1
+        raise httpx.ReadTimeout("The read operation timed out")
+
+    monkeypatch.setattr(motor, "_enviar_una_vez", falso)
+
+    with pytest.raises(httpx.ReadTimeout):
+        motor.enviar(tmp_path / "x.csv", oficial=True)
     assert intentos["n"] == motor.REINTENTOS
+
+
+# --- Un reinicio de la plataforma a mitad de la carga ---------------------------
+#
+# Sin AUTH_SECRET fijo, la plataforma firma las sesiones con una clave nueva cada
+# vez que arranca: el token de antes del reinicio da 401. Los logs del 29-09,
+# 30-09 y 02-10-2026 muestran lo mismo: 502, 503, 401, sugerido del dia perdido y
+# tampoco la incidencia (otro 401). `enviar()` reintentaba con el token viejo.
+
+
+class _PlataformaQueSeReinicia:
+    """Una plataforma falsa que cambia la clave de las sesiones al reiniciarse.
+
+    `cargas` es lo que pasa con cada POST de la carga, en orden:
+      "cae"       responde 502 y vuelve con otra clave (Render se reinicio);
+      "levanta"   responde 503 (todavia esta arrancando);
+      "reinicia"  se reinicio otra vez justo despues del login: la sesion recien
+                  tomada ya no vale y responde 401;
+      "carga"     carga si la sesion es de la clave de ahora; si no, 401.
+    """
+
+    def __init__(self, cargas=()):
+        self.cargas = list(cargas)
+        self.clave = 0
+        self.logins = 0
+        self.respuestas: list[int] = []
+        self.incidencias: list[dict] = []
+
+    def _vale(self, headers) -> bool:
+        token = (headers or {}).get("Authorization", "").removeprefix("Bearer ")
+        return token.startswith(f"clave{self.clave}-")
+
+    def post(self, url, json=None, headers=None, files=None):
+        pedido = httpx.Request("POST", url)
+        if url.endswith("/api/auth/login"):
+            self.logins += 1
+            return httpx.Response(200, json={"token": f"clave{self.clave}-{self.logins}"},
+                                  request=pedido)
+        if url.endswith("/api/incidencias"):
+            codigo = 200 if self._vale(headers) else 401
+            if codigo == 200:
+                self.incidencias.append(json)
+            return httpx.Response(codigo, json={}, request=pedido)
+        paso = self.cargas.pop(0)
+        if paso == "cae":
+            self.clave += 1
+            codigo = 502
+        elif paso == "levanta":
+            codigo = 503
+        else:
+            if paso == "reinicia":
+                self.clave += 1
+            codigo = 200 if self._vale(headers) else 401
+        self.respuestas.append(codigo)
+        return httpx.Response(codigo, json={"filas_cargadas": 18254}, request=pedido)
+
+
+class _ClienteFalso:
+    def __init__(self, plataforma):
+        self.plataforma = plataforma
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def post(self, *a, **k):
+        return self.plataforma.post(*a, **k)
+
+
+@pytest.fixture
+def plataforma(monkeypatch):
+    def armar(cargas=()):
+        p = _PlataformaQueSeReinicia(cargas)
+        monkeypatch.setattr(httpx, "Client", lambda *a, **k: _ClienteFalso(p))
+        monkeypatch.setattr(motor, "_credenciales",
+                            lambda: ("https://x", "motor@ejemplo.cl", "clave-de-prueba"))
+        return p
+
+    motor.olvidar_token()
+    yield armar
+    motor.olvidar_token()
+
+
+def _csv(tmp_path):
+    ruta = tmp_path / "sugerido_motor.csv"
+    ruta.write_text("Producto;Sucursal\n", encoding="utf-8")
+    return ruta
+
+
+def test_el_caso_de_los_logs_ya_no_pierde_el_dia(plataforma, tmp_path):
+    """La secuencia exacta de los tres dias: se cae, sigue levantando y vuelve con
+    otra clave. Con el token viejo el tercer intento daba 401; entrando de nuevo, carga."""
+    p = plataforma(["cae", "levanta", "carga"])
+
+    r = motor.enviar(_csv(tmp_path), oficial=True)
+
+    assert r["filas_cargadas"] == 18254
+    assert p.respuestas == [502, 503, 200]
+    assert p.logins == 3, "cada intento entra de nuevo a la plataforma"
+
+
+def test_502_503_401_y_al_cuarto_intento_carga(plataforma, tmp_path):
+    """Aunque la plataforma se reinicie otra vez y el 401 llegue igual, el cuarto
+    intento entra con una sesion nueva y carga."""
+    p = plataforma(["cae", "levanta", "reinicia", "carga"])
+
+    r = motor.enviar(_csv(tmp_path), oficial=True)
+
+    assert r["filas_cargadas"] == 18254
+    assert p.respuestas == [502, 503, 401, 200]
+    assert p.logins == 4
+
+
+def test_la_incidencia_del_fallo_entra_con_sesion_nueva(plataforma):
+    """Se avisa justo despues de un fallo: si fue un reinicio, el token de la
+    corrida ya no vale y la incidencia no llegaba (401 en los mismos tres logs)."""
+    p = plataforma()
+    p.clave = 1
+    motor._TOKEN["valor"] = "clave0-1"  # el de antes del reinicio
+
+    assert motor.avisar_falla("El motor calculo bien, pero la plataforma rechazo la carga.")
+    assert p.logins == 1
+    assert len(p.incidencias) == 1
