@@ -39,8 +39,8 @@ class _Pc:
     def __init__(self, raiz: pathlib.Path):
         self.raiz = raiz
         (raiz / "scripts").mkdir(parents=True)
-        for nombre in ("tarea_si_no_corrio_hoy.ps1", "actualizar_plataforma.ps1",
-                       "salida_motor.ps1", "robot_erp.ps1"):
+        for nombre in ("tarea_si_no_corrio_hoy.ps1", "tarea_al_iniciar_sesion.ps1",
+                       "actualizar_plataforma.ps1", "salida_motor.ps1", "robot_erp.ps1"):
             shutil.copy2(SCRIPTS / nombre, raiz / "scripts" / nombre)
         (raiz / "scripts" / "tarea_diaria.ps1").write_text(_TAREA_DIARIA_FALSA, encoding="utf-8")
         self.motor("CARGA OFICIAL: 18254 filas.\nRESULTADO: OK", 0)
@@ -160,6 +160,34 @@ def test_si_el_acceso_termina_sin_publicar_la_tarea_calcula(pc):
         ventana.kill()
 
     assert pc.motor_llamado
+
+
+def test_al_iniciar_sesion_antes_de_las_0930_no_corre(pc):
+    """Antes de las 09:30 la corrida es de la tarea diaria (y del programa del ERP)."""
+    pc.correr("tarea_al_iniciar_sesion.ps1", "-Ahora", "2026-10-19 08:40")
+
+    assert not pc.motor_llamado
+
+
+def test_al_iniciar_sesion_despues_de_las_0930_recupera_el_dia(pc):
+    """El PC se reinicio a la 01:00 y nadie entro antes de las 09:30 (evento 332)."""
+    pc.correr("tarea_al_iniciar_sesion.ps1", "-Ahora", "2026-10-19 10:15")
+
+    assert pc.motor_llamado
+
+
+def test_al_iniciar_sesion_no_repite_ni_se_queda_pegado_en_un_candado_viejo(pc):
+    pc.log.parent.mkdir(parents=True)
+    pc.log.write_text("=== 2026-10-19 09:30:04 ===\nRESULTADO: OK\n", encoding="utf-8-sig")
+    pc.correr("tarea_al_iniciar_sesion.ps1", "-Ahora", "2026-10-19 10:15")
+    assert not pc.motor_llamado, "hoy ya hubo corrida"
+
+    pc.log.unlink()
+    muerto = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                            capture_output=True, text=True, check=True)
+    pc.candado(int(muerto.stdout))
+    pc.correr("tarea_al_iniciar_sesion.ps1", "-Ahora", "2026-10-19 10:15")
+    assert pc.motor_llamado, "un candado de una corrida cortada no deja el dia sin recuperar"
 
 
 def test_devuelve_el_codigo_de_la_corrida(pc):

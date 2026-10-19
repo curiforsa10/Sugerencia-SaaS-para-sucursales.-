@@ -1,8 +1,9 @@
 ﻿# ============================================================
 #  tarea_si_no_corrio_hoy.ps1 - La corrida de las 09:30, sin repetir
 #
-#  Lo corre la tarea "Sugerido Curifor - Motor diario" en el PC de la jefa (la deja
-#  instalar_pc_jefa.ps1). Lanza tarea_diaria.ps1 SOLO si:
+#  Lo corren la tarea "Sugerido Curifor - Motor diario" en el PC de la jefa (la deja
+#  instalar_pc_jefa.ps1) y tarea_al_iniciar_sesion.ps1 en los dos PCs. Lanza
+#  tarea_diaria.ps1 SOLO si:
 #    - hoy no hubo corrida: el log del dia (logs\motor_<fecha>.log) no tiene la
 #      linea RESULTADO. El acceso del Escritorio "Actualizar plataforma" corre el
 #      programa del ERP y despues tarea_diaria.ps1, que deja esa linea: si ella ya

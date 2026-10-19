@@ -7,17 +7,22 @@
 #  corre al iniciar sesion y lanza la corrida del dia SOLO si:
 #    - ya pasaron las 09:30 (antes, la corre la tarea diaria a su hora);
 #    - hoy no hubo corrida (el log del dia no tiene la linea RESULTADO);
-#    - no hay otra corrida en curso (candado del motor).
+#    - no hay otra corrida en curso (candado del motor con su proceso vivo).
 #  Asi no corre dos veces ni antes que el programa del ERP.
+#
+#  Las dos ultimas condiciones las mira tarea_si_no_corrio_hoy.ps1, que ademas
+#  espera si el acceso "Actualizar plataforma" esta bajando las tablas (en el PC de
+#  la jefa: ella puede abrirlo apenas inicia sesion). Antes este script miraba solo
+#  si existia el candado: uno viejo, de una corrida cortada por un apagon, dejaba
+#  el dia sin recuperar.
 # ============================================================
+param(
+    # La hora que se compara con las 09:30. Solo las pruebas la cambian.
+    [datetime]$Ahora = (Get-Date)
+)
 $ErrorActionPreference = "Continue"
-$root = Split-Path $PSScriptRoot -Parent
-$log = "$root\logs\motor_$(Get-Date -Format 'yyyy-MM-dd').log"
-$candado = "$root\apps\api\data\motor.lock"
 
-if ((Get-Date).TimeOfDay -lt [TimeSpan]::Parse("09:30")) { exit 0 }
-if ((Test-Path $log) -and (Select-String -Path $log -Pattern '^RESULTADO' -Quiet)) { exit 0 }
-if (Test-Path $candado) { exit 0 }
+if ($Ahora.TimeOfDay -lt [TimeSpan]::Parse("09:30")) { exit 0 }
 
-& "$PSScriptRoot\tarea_diaria.ps1"
+& "$PSScriptRoot\tarea_si_no_corrio_hoy.ps1"
 exit $LASTEXITCODE
