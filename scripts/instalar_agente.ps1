@@ -55,7 +55,11 @@ Titulo "[2/5] Preparando el motor (esto es lo que mas tarda)"
 $venvPy = "$root\apps\api\.venv\Scripts\python.exe"
 if (-not (Test-Path $venvPy)) { & $py -m venv "$root\apps\api\.venv" }
 & $venvPy -m pip install --upgrade pip --quiet
-& $venvPy -m pip install -r "$root\apps\api\requirements.txt" --quiet
+# Las versiones exactas del motor; requirements.txt es el de la API (ver el comentario
+# de requirements-motor.txt).
+$req = "$root\apps\api\requirements-motor.txt"
+if (-not (Test-Path $req)) { $req = "$root\apps\api\requirements.txt" }
+& $venvPy -m pip install -r $req --quiet
 Bien "Motor listo"
 
 # --------------------------------------------------------- 3) Los tres datos
@@ -87,7 +91,9 @@ $clave = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
 Write-Host ""
 Write-Host "    Por ultimo, la clave del agente (te la pasa quien administra la"
 Write-Host "    plataforma; es la misma que esta configurada en el servidor)."
-$secreto = Read-Host "    Clave del agente"
+$secretoSec = Read-Host "    Clave del agente" -AsSecureString
+$secreto = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secretoSec))
 
 $apiUrl = $env:PLATAFORMA_API_URL
 if (-not $apiUrl) { $apiUrl = "https://sugerido-api.onrender.com" }
@@ -113,14 +119,17 @@ $accion = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
     "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass " +
     "-File `"$root\scripts\agente_actualizacion.ps1`"")
 # Dos disparadores: al iniciar sesion (para que reviva solo despues de reiniciar) y
-# uno que se repite cada minuto indefinidamente (la cadencia real).
-$t1 = New-ScheduledTaskTrigger -AtLogOn
+# uno que se repite cada minuto indefinidamente (la cadencia real). El de inicio de
+# sesion va con el usuario: sin el es "cualquier usuario", y eso pide administrador.
+$t1 = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $t2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes 1)
-# IgnorarNueva: el motor tarda ~3 min y la tarea despierta cada 1, no deben encimarse.
+# IgnorarNueva: el motor tarda ~30 min y la tarea despierta cada 1, no deben encimarse.
+# 90 minutos de tope: la plataforma espera 75 una corrida (con 30, Windows cortaba al
+# agente a mitad de la publicacion).
 $config = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 90)
 Register-ScheduledTask -TaskName $TAREA -Action $accion -Trigger $t1, $t2 -Settings $config `
     -Description "Atiende el boton 'Actualizar ahora' de la plataforma de sugerido." -Force | Out-Null
 Bien "Tarea '$TAREA' creada (revisa cada minuto)"
@@ -131,7 +140,18 @@ try {
     $r = Invoke-RestMethod -Uri "$apiUrl/api/actualizacion/pendiente?agente=$env:COMPUTERNAME" `
         -Headers @{ "X-Agente-Secret" = $secreto } -Method Get -TimeoutSec 90
     Bien "La plataforma responde y acepta la clave del agente"
-    if ($r.hay) { Ojo "Ademas habia una solicitud pendiente: el agente la tomara enseguida." }
+    if ($r.hay) {
+        # Preguntar ya la tomo: si no se cierra aca, la tarjeta de la web queda girando
+        # hasta que la plataforma la de por perdida.
+        $msg = "Este PC se estaba instalando y no pudo atender la solicitud. Vuelve a apretar el bot$([char]0xF3)n."
+        $cuerpo = @{ id = $r.id; ok = $false; mensaje = $msg } | ConvertTo-Json -Compress
+        try {
+            Invoke-RestMethod -Uri "$apiUrl/api/actualizacion/terminar" -Headers @{ "X-Agente-Secret" = $secreto } `
+                -Method Post -ContentType "application/json; charset=utf-8" `
+                -Body ([Text.Encoding]::UTF8.GetBytes($cuerpo)) -TimeoutSec 60 | Out-Null
+        } catch { }
+        Ojo "Habia una solicitud pendiente en la web: quedo cerrada; que la vuelvan a pedir."
+    }
 }
 catch {
     if ("$($_.Exception.Message)" -match "403") {
