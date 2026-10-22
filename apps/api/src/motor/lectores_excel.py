@@ -292,6 +292,8 @@ COLUMNAS_VENTAS = {
     # La descripcion del producto sale de las VENTAS, no del listado maestro
     # (DAX: 'Dim Producto'[Descripcion] = MINX sobre 'Ventas Unificadas').
     "Descripcion Producto": "Descripcion Producto",
+    # El monto neto: si es negativo el documento es de credito y la venta resta.
+    "Total Neta": "Total Neta",
 }
 
 # Valor canonico que espera el filtro de repuestos del conector.
@@ -393,6 +395,7 @@ COLUMNAS_VENTAS_FRONTERA = {
     "Documento": "Documento",
     "Docto-Emitido": "Docto-Emitido",
     "tipoproducto": "tipoproducto",
+    "TOTAL NETA": "Total Neta",
 }
 
 
