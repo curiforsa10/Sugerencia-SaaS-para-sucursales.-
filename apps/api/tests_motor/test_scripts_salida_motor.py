@@ -1,6 +1,5 @@
 """Lo que leen de la salida del motor los scripts que lo corren sin nadie mirando:
-`scripts/agente_actualizacion.ps1` (el boton "Actualizar ahora") y
-`scripts/tarea_vigentes_ford.ps1`. Las dos funciones viven en
+`scripts/agente_actualizacion.ps1` (el boton "Actualizar ahora"). Las funciones viven en
 `scripts/salida_motor.ps1` y se prueban con el PowerShell de Windows, el mismo que
 usan las tareas programadas.
 
@@ -223,10 +222,21 @@ def test_actualizacion_del_motor_en_curso_mira_el_candado_del_agente(tmp_path):
     assert _en_curso(tmp_path, "ActualizacionMotor-EnCurso") == "<nulo>"
 
 
-def test_los_dos_scripts_miran_si_el_pc_es_el_titular():
-    for nombre in ("agente_actualizacion.ps1", "tarea_vigentes_ford.ps1"):
+def test_el_agente_mira_si_el_pc_es_el_titular():
+    for nombre in ("agente_actualizacion.ps1",):
         texto = (SCRIPTS / nombre).read_text(encoding="utf-8-sig")
         assert '. "$PSScriptRoot\\salida_motor.ps1"' in texto, nombre
         assert "Titular-SiNoPublico" in texto, nombre
     agente = (SCRIPTS / "agente_actualizacion.ps1").read_text(encoding="utf-8")
     assert ".Matches.Groups[1]" not in agente
+
+
+def test_la_corrida_de_ford_no_lanza_el_motor_ni_trae_rutas_de_un_usuario():
+    """Se traspasa a otro PC: las rutas salen del .env, y el motor solo corre con el boton
+    "Actualizar ahora" (el archivo queda en crudos y se publica en la proxima actualizacion)."""
+    texto = (SCRIPTS / "tarea_vigentes_ford.ps1").read_text(encoding="utf-8-sig")
+    assert "-m src.jobs.correr_motor_real --oficial" not in texto
+    assert "salida_motor.ps1" not in texto
+    assert "C:\\Users\\" not in texto, "hay una ruta de un usuario fija"
+    for variable in ("FORD_EXTRACTOR_DIR", "FORD_PYTHON", "MOTOR_CRUDOS_DIR"):
+        assert variable in texto, variable

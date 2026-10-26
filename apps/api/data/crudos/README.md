@@ -43,7 +43,7 @@ cuántas filas.
 | Mix de reemplazos | `Base mix reemplazos\BASE NUEVO MIX 2026_1.xlsx` | Fuera del programa del ERP | 120; frena |
 | Lista del ERP | `Lista ERP\lista_erp.xlsx` | Exportación manual, semanal | 10; solo avisa |
 | Listas de precios Ford y Gildemeister | `Lista de precios\Lista de precios proveedores\` | Fuera del programa del ERP | Sin plazo |
-| Vigentes Ford | `Vigentes Ford\Vigentes ford curifor_<fecha>_resultado.xlsx` | La tarea semanal del extractor Ford | Sin plazo |
+| Vigentes Ford | `Vigentes Ford\Vigentes ford curifor_<fecha>_resultado.xlsx` | El extractor Ford (los lunes, a mano, con `ACTUALIZAR FORD.cmd`; ver `docs/extractor-ford.md`) | Sin plazo |
 
 Las pautas de mantención y las otras listas de proveedor el motor no las lee, pero
 las reconoce por nombre para no confundirlas con un respaldo de venta.

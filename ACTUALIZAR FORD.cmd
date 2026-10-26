@@ -1,5 +1,5 @@
 @echo off
-REM Doble clic aqui para traer los reemplazos y precios de FORD y publicarlos.
+REM Doble clic aqui (los lunes) para traer los reemplazos y precios de FORD.
 REM
 REM Es lo mismo que hace la tarea automatica de los lunes a las 9:00. Sirve para
 REM no esperar al lunes: tipicamente despues de renovar la sesion del portal.
@@ -12,8 +12,9 @@ echo  ============================================================
 echo   ACTUALIZAR REEMPLAZOS Y PRECIOS DE FORD
 echo  ============================================================
 echo.
-echo   Consulta el portal de FORD y publica el resultado en la
-echo   plataforma. Demora unos 30 minutos.
+echo   Consulta el portal de FORD y deja el resultado en la carpeta
+echo   Bases de datos. Demora unos 35 minutos. Cuando diga LISTO,
+echo   aprieta "Actualizar ahora" en la plataforma para publicarlo.
 echo.
 echo   Si la sesion del portal vencio, se va a abrir una ventana
 echo   de Chrome pidiendo usuario, clave y MFA. Hay que entrar ahi
@@ -29,7 +30,7 @@ set CODIGO=%ERRORLEVEL%
 echo.
 if "%CODIGO%"=="0" (
   echo  ============================================================
-  echo   LISTO. La plataforma ya tiene los reemplazos y precios nuevos.
+  echo   LISTO. Ahora aprieta "Actualizar ahora" en la plataforma.
   echo  ============================================================
 ) else (
   echo  ============================================================

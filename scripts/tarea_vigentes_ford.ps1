@@ -3,15 +3,17 @@
 #
 #  Consulta en el portal de FORD los codigos que Curifor tiene (stock + pautas),
 #  arma el Excel con el vigente y la cadena de reemplazo de cada uno, y lo deja en
-#  la carpeta de crudos. Al dia siguiente el motor diario lo toma solo.
+#  la carpeta de crudos. NO lanza el motor: el archivo se publica con el proximo
+#  "Actualizar ahora" de la plataforma.
 #
-#  Corre los LUNES a las 09:00. La hora no es al azar: el motor diario corre a las
-#  10:00, y la extraccion tarda ~37 min, asi que alcanza a dejar el Excel en crudos
-#  y los reemplazos frescos entran el mismo lunes. Si una semana se pone lenta y
-#  termina despues de las 10:00 no se pierde nada: los toma el motor del martes.
+#  Se corre los LUNES, a mano, con el acceso "ACTUALIZAR FORD.cmd" y con una persona
+#  delante: abre un Chrome visible y, si la sesion de Ford vencio, pide el MFA. Tarda
+#  unos 37 minutos. En el PC del dueño la tarea programada de los lunes a las 09:00
+#  hace lo mismo hasta el dia del cambio de PC titular. Se probo a las 07:30 y estaba
+#  mal pensado: necesita sesion de Windows iniciada y a esa hora el PC esta apagado.
 #
-#  Se probo primero a las 07:30 y estaba mal pensado: la tarea necesita sesion de
-#  Windows iniciada -abre un Chrome visible- y a esa hora el PC esta apagado.
+#  Las rutas salen del .env del motor (FORD_EXTRACTOR_DIR, FORD_PYTHON y
+#  MOTOR_CRUDOS_DIR). Sin ellas se usan las de siempre del PC del dueño.
 #
 #  Si la sesion de Ford vencio, la corrida se queda esperando el MFA -eso es
 #  deliberado, el segundo factor no se automatiza-. Por eso hay un tope de tiempo:
@@ -20,10 +22,27 @@
 # ============================================================
 $ErrorActionPreference = "Continue"
 
-$wings = "C:\Users\icalderon\OneDrive - Curifor S.A\Documentos\Desarrollos\Automatizaciones\5. Extraccion precios ford"
-$crudos = "C:\Users\icalderon\OneDrive - Curifor S.A\Documentos\Desarrollos\Bases de datos\Vigentes Ford"
-$python = "C:\Users\icalderon\AppData\Local\Python\pythoncore-3.14-64\python.exe"
 $root = Split-Path $PSScriptRoot -Parent
+
+# Configuracion del .env del motor, igual que el agente: -Encoding UTF8 porque la
+# carpeta de Data BI lleva tilde y sin eso PowerShell 5.1 la lee como Windows-1252.
+$envFile = "$root\.env"
+if (Test-Path $envFile) {
+    foreach ($linea in Get-Content $envFile -Encoding UTF8) {
+        if ($linea -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$') {
+            $valor = $matches[2].Trim().Trim('"').Trim("'")
+            if ($valor) { Set-Item -Path "env:$($matches[1])" -Value $valor }
+        }
+    }
+}
+$od = $env:OneDriveCommercial
+# La carpeta del programa de extraccion (con armar_lista_consulta.py y
+# correr_vigentes_curifor.py), el Python que tiene sus librerias (playwright, keyring) y
+# la carpeta de crudos donde el motor busca el Excel (la primera de MOTOR_CRUDOS_DIR).
+$wings = if ($env:FORD_EXTRACTOR_DIR) { $env:FORD_EXTRACTOR_DIR } else { "$od\Documentos\Desarrollos\Automatizaciones\5. Extraccion precios ford" }
+$python = if ($env:FORD_PYTHON) { $env:FORD_PYTHON } else { "$env:LOCALAPPDATA\Python\pythoncore-3.14-64\python.exe" }
+$basesDeDatos = if ($env:MOTOR_CRUDOS_DIR) { ($env:MOTOR_CRUDOS_DIR -split ';')[0].Trim() } else { "$od\Documentos\Desarrollos\Bases de datos" }
+$crudos = Join-Path $basesDeDatos "Vigentes Ford"
 $logDir = "$root\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 $log = "$logDir\vigentes_ford_$(Get-Date -Format 'yyyy-MM-dd').log"
@@ -42,9 +61,6 @@ $topeMinutos = 90
 function Log($msg) {
     "[$(Get-Date -Format 'HH:mm:ss')] $msg" | Out-File $log -Append -Encoding utf8
 }
-
-# Que dijo el motor al final: si este PC ya no es el titular, no publico nada.
-. "$PSScriptRoot\salida_motor.ps1"
 
 "=== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" | Out-File $log -Append -Encoding utf8
 Log "Corrida semanal de vigentes FORD"
@@ -157,38 +173,11 @@ Get-ChildItem $crudos -Filter "Vigentes ford curifor_*_resultado.xlsx" |
     Sort-Object LastWriteTime -Descending | Select-Object -Skip 4 |
     Remove-Item -Force -ErrorAction SilentlyContinue
 
-if ($codigoCorrida -eq 0) {
-    # Se encadena el motor en vez de esperar a su corrida propia. Antes el archivo
-    # fresco de FORD quedaba en crudos y la plataforma recien lo mostraba al dia
-    # siguiente: los reemplazos y precios llegaban un dia tarde, todas las semanas.
-    #
-    # No se depende de que la extraccion termine antes de las 9:30 (tarda ~25 min y
-    # el margen seria de 5): el motor se llama aca, cuando el dato ya esta.
-    Log "Lanzando el motor para publicar los datos nuevos..."
-    Push-Location "$root\apps\api"
-    # Tee-Object -Variable: la salida sigue bajando al log linea a linea (con Out-File,
-    # en UTF-8) y ademas queda en $salidaMotor para revisar si este PC era el titular.
-    & "$root\apps\api\.venv\Scripts\python.exe" -u -m src.jobs.correr_motor_real --oficial 2>&1 |
-        ForEach-Object { "$_" } | Tee-Object -Variable salidaMotor | Out-File $log -Append -Encoding utf8
-    $codigoMotor = $LASTEXITCODE
-    $titular = if ($codigoMotor -eq 0) { Titular-SiNoPublico $salidaMotor } else { $null }
-    if ($titular) {
-        # Sale con 0 a proposito, pero no calculo ni publico (ver salida_motor.ps1).
-        Log "El motor NO publico: este PC ya no es el titular (el titular es $titular)."
-        Log "En este PC hay que deshabilitar esta tarea (ver data/crudos/README.md)."
-    } elseif ($codigoMotor -eq 0) {
-        Log "Motor OK: la plataforma ya tiene los reemplazos y precios nuevos."
-    } else {
-        # No se cambia $codigoCorrida: la extraccion SI funciono y el archivo quedo
-        # en crudos. El motor vuelve a intentar solo en su corrida de las 9:30.
-        Log "El motor fallo (codigo $codigoMotor). El archivo quedo en crudos y la"
-        Log "corrida de las 9:30 lo va a publicar igual."
-    }
-    Pop-Location
-    "RESULTADO: OK" | Out-File $log -Append -Encoding utf8
-} else {
-    "RESULTADO: FALLO (codigo $codigoCorrida)" | Out-File $log -Append -Encoding utf8
-}
+# El motor NO se lanza desde aca: en el PC de la jefa solo corre cuando alguien aprieta
+# "Actualizar ahora". El archivo ya esta donde el motor lo busca.
+Log "LISTO: el archivo quedo en $crudos."
+Log "Para publicarlo, aprieta 'Actualizar ahora' en la plataforma."
+"RESULTADO: OK" | Out-File $log -Append -Encoding utf8
 
 Get-ChildItem $logDir -Filter "vigentes_ford_*.log" |
     Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-60) } |
