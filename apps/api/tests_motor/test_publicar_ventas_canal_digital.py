@@ -13,8 +13,12 @@ Lo que estos tests cuidan:
 3. Un respaldo sin las columnas minimas NO publica nada, ni los meses buenos.
 4. Las tres formas de fecha de los respaldos salen en ISO; si ninguna se entiende,
    el archivo cambio de formato y se frena en vez de perder las ventas en silencio.
-5. Un fallo se anota como el de cualquier paso y no rompe la corrida.
+5. Solo es FALLO lo que se arregla reintentando (red, Render); un respaldo mal armado
+   o un rechazo de la plataforma es un AVISO y no vuelve incompleta la corrida.
 6. Nada sale a la red de verdad: ni un socket.
+7. Lo que se descarta se cuenta: nunca "al dia" sin haber subido nada, nunca un mes
+   duplicado, nunca un exito si la plataforma no cargo las lineas.
+8. Que meses subir se decide con las LINEAS de la plataforma, no con su venta.
 """
 import csv
 import datetime as dt
@@ -80,25 +84,35 @@ def _sin_red(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fallos_aislados():
-    """Los fallos de un test no pueden volver incompleta la corrida de otro."""
+    """Los fallos y avisos de un test no pueden volver incompleta la corrida de otro."""
     copia = list(job._FALLOS)
     job._FALLOS.clear()
+    job._AVISOS_CANAL.clear()
     job.olvidar_token()
     yield
     job._FALLOS[:] = copia
+    job._AVISOS_CANAL.clear()
     job.olvidar_token()
 
 
 class _Plataforma:
     """GET meta, POST lineas y el login. Guarda lo que recibe y, como la de verdad,
-    deja de pedir un mes cuando ya lo tiene."""
+    deja de pedir un mes cuando ya lo tiene.
 
-    def __init__(self, periodo_hasta=None, meta=200):
+    `periodo_hasta` es hasta donde tiene LINEAS (el `lineas_periodo_hasta` del meta);
+    `venta_hasta` es el `periodo_hasta` del meta, que sale de la venta ya armada y puede
+    ir mas adelante si alguien la cargo a mano. `con_lineas_hasta=False` es una
+    plataforma anterior a ese campo."""
+
+    def __init__(self, periodo_hasta=None, meta=200, *, venta_hasta="igual", con_lineas_hasta=True):
         self.periodo_hasta = periodo_hasta
+        self.venta_hasta = periodo_hasta if venta_hasta == "igual" else venta_hasta
+        self.con_lineas_hasta = con_lineas_hasta
         self.codigo_meta = meta
         self.gets: list[str] = []
         self.posts: list[tuple[str, dict]] = []
         self.fallos_post: list = []  # una entrada por POST: codigo, excepcion o None
+        self.respuestas_post: list = []  # una entrada por POST: el JSON de un 200, o None (el normal)
         self.clientes = 0
 
     def _resp(self, metodo, url, codigo, datos):
@@ -106,7 +120,10 @@ class _Plataforma:
 
     def get(self, url, headers=None, **k):
         self.gets.append(url)
-        return self._resp("GET", url, self.codigo_meta, {"periodo_hasta": self.periodo_hasta})
+        meta = {"periodo_hasta": self.venta_hasta}
+        if self.con_lineas_hasta:
+            meta["lineas_periodo_hasta"] = self.periodo_hasta
+        return self._resp("GET", url, self.codigo_meta, meta)
 
     def post(self, url, json=None, headers=None, **k):
         if url.endswith("/api/auth/login"):
@@ -116,9 +133,14 @@ class _Plataforma:
         if isinstance(falla, Exception):
             raise falla
         if falla:
-            return self._resp("POST", url, falla, {})
+            cuerpo = falla[1] if isinstance(falla, tuple) else {}
+            return self._resp("POST", url, falla[0] if isinstance(falla, tuple) else falla, cuerpo)
+        propia = self.respuestas_post.pop(0) if self.respuestas_post else None
+        if propia is not None:
+            return self._resp("POST", url, 200, propia)
         periodo = json["lineas"][0]["periodo"]
         self.periodo_hasta = max(self.periodo_hasta or "000000", periodo)
+        self.venta_hasta = max(self.venta_hasta or "000000", periodo)  # y la venta se arma con ellas
         return self._resp("POST", url, 200, {
             "lineas_cargadas": len(json["lineas"]), "lineas_ignoradas": 0,
             "periodos": [periodo], "filas_venta": 1, "estadisticas": {}})
@@ -159,8 +181,8 @@ def mundo(monkeypatch, tmp_path):
             monkeypatch.setattr(job, "_archivos_de_ventas", lambda fin: list(self.respaldos))
             return ruta
 
-        def plataforma_con(self, periodo_hasta=None, meta=200):
-            self.plataforma = _Plataforma(periodo_hasta, meta)
+        def plataforma_con(self, periodo_hasta=None, meta=200, **k):
+            self.plataforma = _Plataforma(periodo_hasta, meta, **k)
             monkeypatch.setattr(httpx, "Client", lambda **k: _Cliente(self.plataforma))
             return self.plataforma
 
@@ -190,12 +212,19 @@ def test_al_dia_no_sube_nada_ni_abre_el_respaldo(mundo, monkeypatch, tmp_path):
     assert not job._FALLOS
 
 
-def test_el_respaldo_sin_meses_nuevos_tambien_es_al_dia(mundo):
+def test_un_respaldo_sin_el_mes_que_falta_no_esta_al_dia_y_lo_dice(mundo, capsys):
+    """El ultimo mes cerrado es septiembre y el respaldo llega hasta agosto: todavia no lo
+    pegaron. No se sube nada, pero tampoco se declara "al dia"."""
     mundo.respaldo([_fila("202607", numero="1"), _fila("202608", numero="2")])
     p = mundo.plataforma_con("202608")
 
-    assert mundo.publicar() == {"lineas_cargadas": 0, "periodos": [], "al_dia": True}
-    assert p.posts == []
+    r = mundo.publicar()
+
+    assert r == {"lineas_cargadas": 0, "periodos": [], "al_dia": False, "pendiente": "202609"}
+    assert p.posts == [] and not job._FALLOS
+    assert len(job._AVISOS_CANAL) == 1
+    assert "hasta 202608" in job._AVISOS_CANAL[0] and "202609" in job._AVISOS_CANAL[0]
+    assert "no trae lineas del canal" in capsys.readouterr().out
 
 
 def test_subido_el_mes_la_corrida_siguiente_no_sube_nada(mundo):
@@ -313,10 +342,12 @@ def test_sin_las_columnas_minimas_falla_claro_y_no_publica(mundo, falta):
     assert mundo.publicar() is None
 
     assert p.posts == []
-    assert [f["paso"] for f in job._FALLOS] == [PASO]
-    error = job._FALLOS[0]["error"]
-    assert falta in error and "2026 (6).xlsx" in error and "No se publico nada" in error
-    assert not job._FALLOS[0]["transitorio"], "reintentar no arregla un respaldo mal armado"
+    # Un respaldo mal armado no se arregla reintentando: es un aviso, no un fallo que
+    # vuelva incompleta la corrida.
+    assert not job._FALLOS
+    assert len(job._AVISOS_CANAL) == 1
+    aviso = job._AVISOS_CANAL[0]
+    assert falta in aviso and "2026 (6).xlsx" in aviso and "No se publico nada" in aviso
 
 
 def test_un_respaldo_malo_frena_tambien_los_meses_buenos_de_otro(mundo):
@@ -330,7 +361,7 @@ def test_un_respaldo_malo_frena_tambien_los_meses_buenos_de_otro(mundo):
     assert mundo.publicar() is None
 
     assert p.posts == []
-    assert "2026 (6).xlsx" in job._FALLOS[0]["error"]
+    assert "2026 (6).xlsx" in job._AVISOS_CANAL[0]
 
 
 def test_las_columnas_de_referencia_pueden_no_estar(mundo):
@@ -463,24 +494,26 @@ def test_si_el_respaldo_no_trae_fechas_legibles_cambio_de_formato_y_no_se_public
 
     assert mundo.publicar() is None
 
-    assert p.posts == []
-    error = job._FALLOS[0]["error"]
-    assert "20 de 20" in error and "9 de septiembre" in error and "cambio de formato" in error
+    assert p.posts == [] and not job._FALLOS
+    aviso = job._AVISOS_CANAL[0]
+    assert "20 de 20" in aviso and "9 de septiembre" in aviso and "cambio de formato" in aviso
 
 
-# --- Fallos: nunca rompen la corrida --------------------------------------------
+# --- Fallos: solo lo transitorio es un fallo ------------------------------------
 
 
-def test_un_500_devuelve_none_y_queda_anotado(mundo):
+def test_un_500_es_un_aviso_y_no_un_fallo(mundo):
+    """Un 500 de la plataforma no se arregla reintentando en el momento, y el canal no
+    alimenta el sugerido: la corrida no queda incompleta, la proxima lo vuelve a intentar."""
     mundo.respaldo([_fila()])
     p = mundo.plataforma_con("202608")
     p.fallos_post = [500]
 
     assert mundo.publicar() is None
 
-    assert [f["paso"] for f in job._FALLOS] == [PASO]
-    assert "500" in job._FALLOS[0]["error"]
-    assert not job._FALLOS[0]["transitorio"]
+    assert not job._FALLOS
+    assert len(job._AVISOS_CANAL) == 1
+    assert "500" in job._AVISOS_CANAL[0] and "corrida siguiente" in job._AVISOS_CANAL[0]
 
 
 def test_un_corte_de_red_devuelve_none_y_se_marca_transitorio(mundo):
@@ -557,6 +590,357 @@ def test_la_bodega_va_en_el_meta_y_en_el_cuerpo(mundo):
     assert p.posts[0][1]["bodega"] == "431"
 
 
+# --- Hasta donde hay LINEAS: lo que dice el meta --------------------------------
+
+
+def test_la_venta_cargada_a_mano_no_da_por_subidas_las_lineas(mundo):
+    """La plataforma tiene VENTA hasta septiembre (carga manual, sin lineas). Su
+    `periodo_hasta` diria "al dia", el motor no subiria ninguna linea y las devoluciones de
+    un mes nunca encontrarian su venta de otro. Decide `lineas_periodo_hasta`."""
+    mundo.respaldo([_fila("202608", numero="1"), _fila("202609", numero="2")])
+    p = mundo.plataforma_con(None, venta_hasta="202609")
+
+    r = mundo.publicar()
+
+    assert r["al_dia"] is False and r["periodos"] == ["202608", "202609"]
+    assert _meses(p) == [["202608"], ["202609"]]
+
+
+def test_con_lineas_hasta_agosto_y_venta_hasta_septiembre_sube_septiembre(mundo):
+    mundo.respaldo([_fila("202608", numero="1"), _fila("202609", numero="2")])
+    p = mundo.plataforma_con("202608", venta_hasta="202609")
+
+    assert mundo.publicar()["periodos"] == ["202609"]
+    assert _meses(p) == [["202609"]]
+
+
+def test_con_las_lineas_al_dia_no_importa_hasta_donde_llegue_la_venta(mundo):
+    mundo.respaldo([_fila()])
+    p = mundo.plataforma_con("202609", venta_hasta="202501")
+
+    assert mundo.publicar() == {"lineas_cargadas": 0, "periodos": [], "al_dia": True}
+    assert p.posts == []
+
+
+def test_una_plataforma_sin_lineas_periodo_hasta_recibe_todo_y_lo_dice(mundo):
+    """Anterior a ese campo no se puede saber hasta donde hay lineas. Se manda todo (el
+    endpoint reemplaza por periodo: repetir un mes es inofensivo) en vez de fiarse del
+    `periodo_hasta`, que sale de la venta."""
+    mundo.respaldo([_fila("202608", numero="1"), _fila("202609", numero="2")])
+    p = mundo.plataforma_con("202609", con_lineas_hasta=False)  # su venta llega a 202609
+
+    r = mundo.publicar()
+
+    assert r["periodos"] == ["202608", "202609"] and len(p.posts) == 2
+    assert not job._FALLOS
+    assert "lineas_periodo_hasta" in job._AVISOS_CANAL[0]
+
+
+# --- Lo que se descarta se cuenta: nunca "al dia" en silencio -------------------
+
+
+def test_un_periodo_ilegible_en_unas_pocas_lineas_no_deja_el_canal_al_dia_en_silencio(mundo):
+    """Septiembre llega con el Periodo como texto "2026-09". Pocas lineas frente a los meses
+    buenos del archivo (no es un cambio de formato general), pero sin septiembre la
+    plataforma no esta al dia: se dice, y se dice por que."""
+    mundo.respaldo([_fila("202607", numero=str(i)) for i in range(300)]
+                   + [_fila("2026-09", numero="9"), _fila("2026-09", numero="10")])
+    p = mundo.plataforma_con("202608")
+
+    r = mundo.publicar()
+
+    assert r == {"lineas_cargadas": 0, "periodos": [], "al_dia": False, "pendiente": "202609"}
+    assert p.posts == [] and not job._FALLOS
+    assert "2 lineas del canal con un Periodo que no es AAAAMM" in " ".join(job._AVISOS_CANAL)
+
+
+def test_si_casi_todo_el_periodo_es_ilegible_cambio_de_formato_y_no_se_publica(mundo):
+    mundo.respaldo([_fila("2026-09", numero=str(i)) for i in range(40)])
+    p = mundo.plataforma_con("202608")
+
+    assert mundo.publicar() is None
+
+    assert p.posts == [] and not job._FALLOS
+    aviso = job._AVISOS_CANAL[0]
+    assert "40 de 40" in aviso and "'2026-09'" in aviso and "cambio de formato" in aviso
+
+
+def test_un_canal_con_otro_nombre_no_queda_al_dia_y_dice_que_tipos_vio(mundo):
+    """"VENTA ML" en vez de "VTA ML": ninguna linea pasa el filtro. El aviso muestra lo que
+    SI hay en esos meses para que se vea el nombre nuevo."""
+    mundo.respaldo([_fila("202609", numero=str(i), tipo_venta="VENTA ML") for i in range(30)]
+                   + [_fila("202609", numero=f"m{i}", tipo_venta="VTA MOSTRADOR") for i in range(5)]
+                   + [_fila("202607", numero="viejo", tipo_venta="VTA MOSTRADOR")])
+    p = mundo.plataforma_con("202608")
+
+    r = mundo.publicar()
+
+    assert r["al_dia"] is False and r["pendiente"] == "202609" and r["lineas_cargadas"] == 0
+    assert p.posts == [] and not job._FALLOS
+    aviso = job._AVISOS_CANAL[0]
+    assert "VENTA ML (30)" in aviso and "VTA MOSTRADOR (5)" in aviso, \
+        "solo cuenta la ventana de meses que faltan (el 202607 viejo no)"
+
+
+def test_la_primera_carga_sin_lineas_en_el_respaldo_dice_que_no_hay_ninguna(mundo):
+    mundo.respaldo([_fila("202609", tipo_venta="VTA MOSTRADOR")])
+    mundo.plataforma_con(None)
+
+    r = mundo.publicar()
+
+    assert r["pendiente"] == "202609"
+    assert "la plataforma no tiene lineas" in job._AVISOS_CANAL[0]
+    assert "no trae lineas del canal" in job._AVISOS_CANAL[0]
+
+
+def test_la_plataforma_que_no_carga_ninguna_linea_no_se_da_por_publicada(mundo):
+    """La plataforma responde 200 con lineas_cargadas=0 y periodos=[] (p. ej. quitaron VTA ML
+    de los tipos de la bodega): no se inventa el periodo y se avisa con sus estadisticas."""
+    mundo.respaldo([_fila("202609", numero=str(i)) for i in range(700)])
+    p = mundo.plataforma_con("202608")
+    p.respuestas_post = [{
+        "lineas_cargadas": 0, "lineas_ignoradas": 700, "periodos": [], "filas_venta": 0,
+        "estadisticas": {"ignoradas_invalidas": 0, "ignoradas_tipo_venta": 700, "costo_en_cero": 3}}]
+
+    r = mundo.publicar()
+
+    assert r == {"lineas_cargadas": 0, "periodos": [], "al_dia": False}
+    assert not job._FALLOS
+    aviso = job._AVISOS_CANAL[0]
+    assert "ninguna de las 700" in aviso and "202609" in aviso
+    assert "ignoradas_tipo_venta: 700" in aviso and "costo_en_cero" not in aviso
+
+
+def test_si_la_plataforma_ignora_una_parte_importante_se_avisa(mundo):
+    mundo.respaldo([_fila("202609", numero=str(i)) for i in range(1000)])
+    p = mundo.plataforma_con("202608")
+    p.respuestas_post = [{
+        "lineas_cargadas": 950, "lineas_ignoradas": 50, "periodos": ["202609"], "filas_venta": 9,
+        "estadisticas": {"ignoradas_invalidas": 50, "invalida_campo:fecha": 50}}]
+
+    r = mundo.publicar()
+
+    assert r == {"lineas_cargadas": 950, "periodos": ["202609"], "al_dia": False}
+    assert "ignoro 50 de las 1000" in job._AVISOS_CANAL[0]
+    assert "invalida_campo:fecha: 50" in job._AVISOS_CANAL[0]
+
+
+def test_unas_pocas_lineas_ignoradas_no_hacen_ruido(mundo):
+    mundo.respaldo([_fila("202609", numero=str(i)) for i in range(1000)])
+    p = mundo.plataforma_con("202608")
+    p.respuestas_post = [{"lineas_cargadas": 995, "lineas_ignoradas": 5, "periodos": ["202609"],
+                          "filas_venta": 9, "estadisticas": {"ignoradas_invalidas": 5}}]
+
+    mundo.publicar()
+
+    assert not job._AVISOS_CANAL
+
+
+def test_el_periodo_del_resultado_es_solo_el_que_dice_la_plataforma(mundo):
+    """Un mes que la plataforma no cargo no aparece como publicado."""
+    mundo.respaldo([_fila("202608", numero="1"), _fila("202609", numero="2")])
+    p = mundo.plataforma_con("202607")
+    p.respuestas_post = [
+        {"lineas_cargadas": 0, "lineas_ignoradas": 1, "periodos": [], "estadisticas": {}},
+        None]
+
+    r = mundo.publicar()
+
+    assert r == {"lineas_cargadas": 1, "periodos": ["202609"], "al_dia": False}
+
+
+# --- Lo que la plataforma contesta ----------------------------------------------
+
+
+@pytest.mark.parametrize("codigo", [404, 405])
+def test_una_plataforma_con_el_meta_pero_sin_lineas_no_es_un_fallo(mundo, capsys, codigo):
+    """El motor puede salir antes que el deploy del endpoint nuevo."""
+    mundo.respaldo([_fila()])
+    p = mundo.plataforma_con("202608")
+    p.fallos_post = [codigo]
+
+    assert mundo.publicar() is None
+
+    assert not job._FALLOS and not job._AVISOS_CANAL
+    assert "todavia no recibe lineas" in capsys.readouterr().out
+
+
+def test_un_404_a_mitad_de_la_carga_si_es_un_error(mundo, capsys):
+    """Solo el primer POST se tolera: despues de subir un mes, que el endpoint desaparezca
+    es otra cosa."""
+    mundo.respaldo([_fila("202608", numero="1"), _fila("202609", numero="2")])
+    p = mundo.plataforma_con("202607")
+    p.fallos_post = [None, 404]
+
+    assert mundo.publicar() is None
+
+    assert "todavia no recibe lineas" not in capsys.readouterr().out
+    assert len(p.posts) == 2 and "404" in job._AVISOS_CANAL[0]
+
+
+def test_el_rechazo_de_la_plataforma_trae_su_motivo(mundo):
+    """`raise_for_status` solo dice "422"; el porque viene en el cuerpo."""
+    mundo.respaldo([_fila()])
+    p = mundo.plataforma_con("202608")
+    p.fallos_post = [(422, {"detail": {
+        "mensaje": "Ninguna de las 1 lineas sirvio: revisa los nombres y formatos de los campos.",
+        "estadisticas": {"invalida_campo:fecha": 1}}})]
+
+    assert mundo.publicar() is None
+
+    assert not job._FALLOS
+    aviso = job._AVISOS_CANAL[0]
+    assert "422" in aviso and "Ninguna de las 1 lineas sirvio" in aviso
+
+
+def test_un_conflicto_de_envio_parcial_es_un_aviso_con_su_motivo(mundo):
+    mundo.respaldo([_fila()])
+    p = mundo.plataforma_con("202608")
+    p.fallos_post = [(409, {"detail": {"mensaje": "El envio dejaria un periodo con menos de la mitad"}})]
+
+    assert mundo.publicar() is None
+
+    assert not job._FALLOS
+    assert "409" in job._AVISOS_CANAL[0] and "menos de la mitad" in job._AVISOS_CANAL[0]
+
+
+# --- Un error permanente no se confunde con un corte de red ---------------------
+
+
+def test_un_conteo_con_forma_de_codigo_http_no_vuelve_transitorio_un_respaldo_malo(mundo):
+    """502 lineas sin fecha: el mensaje dice "502 de 502", que parece un Bad Gateway. Es un
+    respaldo que cambio de formato, y reintentar solo gasta minutos leyendolo de nuevo."""
+    mundo.respaldo([_fila(numero=str(i), fecha="sin fecha") for i in range(502)])
+    p = mundo.plataforma_con("202608")
+
+    r = job.publicar_con_reintentos(PASO, job.publicar_ventas_canal_digital)
+
+    assert r is None
+    assert len(p.gets) == 1, "un solo intento: no se relee el respaldo ni se espera"
+    assert not job._FALLOS
+    assert "502 de 502" in job._AVISOS_CANAL[0]
+
+
+def test_el_nombre_del_archivo_con_forma_de_codigo_http_tampoco(mundo):
+    sin_costo = [c for c in CABECERA if c != "Costo Neto"]
+    mundo.respaldo([[v for c, v in zip(CABECERA, _fila()) if c != "Costo Neto"]],
+                   nombre="2026 (503).xlsx", cabecera=sin_costo)
+    p = mundo.plataforma_con("202608")
+
+    assert job.publicar_con_reintentos(PASO, job.publicar_ventas_canal_digital) is None
+
+    assert len(p.gets) == 1 and not job._FALLOS
+
+
+def test_un_corte_de_red_se_reintenta_y_si_sale_bien_no_deja_aviso(mundo):
+    mundo.respaldo([_fila()])
+    p = mundo.plataforma_con("202608")
+    p.fallos_post = [httpx.ConnectError("sin conexion")]
+
+    r = job.publicar_con_reintentos(PASO, job.publicar_ventas_canal_digital)
+
+    assert r["lineas_cargadas"] == 1 and len(p.posts) == 2
+    assert not job._FALLOS and not job._AVISOS_CANAL
+
+
+# --- Las notas de credito necesitan su referencia -------------------------------
+
+
+def _sin_referencia():
+    cabecera = [c for c in CABECERA if "Referencia" not in c]
+    return cabecera, lambda fila: [v for c, v in zip(CABECERA, fila) if "Referencia" not in c]
+
+
+def test_sin_las_columnas_de_referencia_y_con_notas_de_credito_se_avisa(mundo):
+    """Si el ERP renombra esas columnas todas las notas pierden el emparejamiento: sin aviso
+    nadie lo ve. Se publica igual (un respaldo antiguo tampoco las trae)."""
+    cabecera, sin = _sin_referencia()
+    mundo.respaldo([sin(_fila(numero="1", tipo_docto="NC-ELECTR REPTO")),
+                    sin(_fila(numero="2", tipo_docto="NC-ELECTR REPTO")),
+                    sin(_fila(numero="3"))], cabecera=cabecera)
+    p = mundo.plataforma_con("202608")
+
+    assert mundo.publicar()["lineas_cargadas"] == 3
+
+    assert len(job._AVISOS_CANAL) == 1
+    assert "las 2 notas de credito" in job._AVISOS_CANAL[0]
+    assert not job._FALLOS
+
+
+def test_sin_las_columnas_de_referencia_y_sin_notas_de_credito_no_hay_aviso(mundo):
+    cabecera, sin = _sin_referencia()
+    mundo.respaldo([sin(_fila())], cabecera=cabecera)
+    mundo.plataforma_con("202608")
+
+    mundo.publicar()
+
+    assert not job._AVISOS_CANAL
+
+
+def test_con_las_columnas_las_notas_sin_referencia_no_avisan(mundo):
+    """El respaldo real de 2025 trae la mitad de las notas sin referencia: son datos
+    antiguos, no un cambio de formato."""
+    mundo.respaldo([_fila(numero="1", tipo_docto="NC-ELECTR REPTO", doc_ref=None, nro_doc_ref=None),
+                    _fila(numero="2", tipo_docto="NC-ELECTR REPTO")])
+    mundo.plataforma_con("202608")
+
+    mundo.publicar()
+
+    assert not job._AVISOS_CANAL
+
+
+# --- Un mes que esta en dos respaldos no se sube dos veces ----------------------
+
+
+def test_un_mes_en_dos_respaldos_sale_de_uno_solo(mundo):
+    """El endpoint no tiene unique y guarda todas las lineas que llegan; como despues solo se
+    suben meses posteriores, un mes duplicado no se corregiria solo. Gana el de mas lineas."""
+    mundo.respaldo([_fila("202609", numero=str(i)) for i in range(3)], nombre="2025 (4).xlsx")
+    mundo.respaldo([_fila("202609", numero=str(i)) for i in range(5)], nombre="2026 (6).xlsx")
+    p = mundo.plataforma_con("202608")
+
+    r = mundo.publicar()
+
+    assert len(p.posts) == 1 and len(p.posts[0][1]["lineas"]) == 5
+    assert r == {"lineas_cargadas": 5, "periodos": ["202609"], "al_dia": False}
+    aviso = job._AVISOS_CANAL[0]
+    assert "202609" in aviso and "'2025 (4).xlsx': 3" in aviso and "'2026 (6).xlsx': 5" in aviso
+    assert "se usa solo '2026 (6).xlsx'" in aviso
+
+
+def test_un_mes_en_dos_respaldos_gana_el_primero_si_trae_mas_lineas(mundo):
+    mundo.respaldo([_fila("202609", numero=str(i)) for i in range(5)], nombre="2025 (4).xlsx")
+    mundo.respaldo([_fila("202609", numero=str(i)) for i in range(3)], nombre="2026 (6).xlsx")
+    p = mundo.plataforma_con("202608")
+
+    mundo.publicar()
+
+    assert len(p.posts[0][1]["lineas"]) == 5
+    assert "se usa solo '2025 (4).xlsx'" in job._AVISOS_CANAL[0]
+
+
+def test_un_mes_en_dos_respaldos_iguales_se_sube_una_vez(mundo):
+    """Dos copias del mismo archivo: no se duplica nada."""
+    filas = [_fila("202609", numero=str(i)) for i in range(4)]
+    mundo.respaldo(filas, nombre="2026 (5).xlsx")
+    mundo.respaldo(filas, nombre="2026 (6).xlsx")
+    p = mundo.plataforma_con("202608")
+
+    r = mundo.publicar()
+
+    assert len(p.posts) == 1 and r["lineas_cargadas"] == 4
+
+
+def test_meses_distintos_en_cada_respaldo_no_avisan_nada(mundo):
+    mundo.respaldo([_fila("202607", numero="1")], nombre="2025 (4).xlsx")
+    mundo.respaldo([_fila("202609", numero="2")], nombre="2026 (6).xlsx")
+    p = mundo.plataforma_con("202606")
+
+    mundo.publicar()
+
+    assert _meses(p) == [["202607"], ["202609"]] and not job._AVISOS_CANAL
+
+
 # --- Nada sale a la red de verdad -----------------------------------------------
 
 
@@ -581,8 +965,13 @@ def test_la_guarda_de_sockets_ve_los_intentos(_sin_red):
 # --- El enganche en la corrida --------------------------------------------------
 
 
-def _correr(monkeypatch, tmp_path, canal, oficial=True):
-    """`job.run` con todo apagado salvo lo que se anota en `llamadas`."""
+PUBLICAR_CANAL = job.publicar_ventas_canal_digital  # la de verdad, antes de que `_correr` la apague
+
+
+def _correr(monkeypatch, tmp_path, canal, oficial=True, reportes=None):
+    """`job.run` con todo apagado salvo lo que se anota en `llamadas`.
+
+    Con `reportes` (una lista) queda ahi lo que la corrida le manda al panel de Fuentes."""
     csv_ = tmp_path / "sugerido_motor.csv"
     with open(csv_, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["Producto", "SucursalID", "Periodo Ultimo Mes",
@@ -622,6 +1011,8 @@ def _correr(monkeypatch, tmp_path, canal, oficial=True):
     monkeypatch.setattr(job, "publicar_ventas_historicas", _anota("ventas", {"al_dia": True}))
     monkeypatch.setattr(job, "publicar_reglas_manuales", _anota("reglas"))
     monkeypatch.setattr(job, "publicar_ventas_canal_digital", canal(llamadas))
+    if reportes is not None:
+        monkeypatch.setattr(job, "publicar_reporte_fuentes", lambda corrida: reportes.append(corrida))
     return job.run(oficial=oficial), llamadas
 
 
@@ -647,15 +1038,69 @@ def test_la_corrida_en_sombra_no_publica_el_canal(monkeypatch, tmp_path):
     assert codigo == 0 and llamadas == []
 
 
-def test_un_fallo_del_canal_se_anota_y_no_frena_los_pasos_que_siguen(monkeypatch, tmp_path):
+def _de_verdad(llamadas):
+    def paso(*a, **k):
+        llamadas.append("canal")
+        return PUBLICAR_CANAL(*a, **k)
+    return paso
+
+
+def test_un_corte_de_red_en_el_canal_se_anota_y_no_frena_los_pasos_que_siguen(
+        monkeypatch, tmp_path, mundo):
+    """Lo transitorio sigue siendo un fallo, como el de cualquier paso: se reintenta y, si
+    el ultimo intento tambien cae, la carga queda marcada incompleta."""
+    mundo.respaldo([_fila("202608")])
+    p = mundo.plataforma_con("202607")
+    p.fallos_post = [httpx.ConnectError("sin conexion")] * job.REINTENTOS
+
+    codigo, llamadas = _correr(monkeypatch, tmp_path, _de_verdad)
+
+    assert llamadas == ["ventas", "canal", "canal", "canal", "reglas"], \
+        "reintento el canal y las reglas corrieron despues del fallo"
+    assert codigo == 1
+    assert [f["paso"] for f in job._FALLOS] == [PASO]
+
+
+def test_un_respaldo_roto_es_un_aviso_del_panel_y_la_corrida_sale_bien(monkeypatch, tmp_path, mundo):
+    """Un respaldo sin la columna de costo no se arregla reintentando y el canal no alimenta
+    el sugerido: nada de codigo 1, tarjeta roja ni "el sugerido NO se actualizo". Llega al
+    panel de Fuentes de datos, donde alguien lo ve."""
+    sin_costo = [c for c in CABECERA if c != "Costo Neto"]
+    mundo.respaldo([[v for c, v in zip(CABECERA, _fila("202608")) if c != "Costo Neto"]],
+                   cabecera=sin_costo)
+    p = mundo.plataforma_con("202607")
+    reportes: list = []
+
+    codigo, llamadas = _correr(monkeypatch, tmp_path, _de_verdad, reportes=reportes)
+
+    assert llamadas == ["ventas", "canal", "reglas"]
+    assert codigo == 0 and not job._FALLOS and p.posts == []
+    assert reportes[0]["resultado"] == "ok"
+    assert [a for a in reportes[0]["avisos"] if "Costo Neto" in a], reportes[0]["avisos"]
+
+
+def test_el_rechazo_de_la_plataforma_tampoco_vuelve_incompleta_la_corrida(monkeypatch, tmp_path, mundo):
+    mundo.respaldo([_fila("202608")])
+    p = mundo.plataforma_con("202607")
+    p.fallos_post = [500]
+    reportes: list = []
+
+    codigo, _ = _correr(monkeypatch, tmp_path, _de_verdad, reportes=reportes)
+
+    assert codigo == 0 and not job._FALLOS
+    assert [a for a in reportes[0]["avisos"] if "500" in a]
+
+
+def test_los_avisos_del_canal_no_se_repiten_en_el_panel(monkeypatch, tmp_path):
     def canal(llamadas):
         def paso(*a, **k):
             llamadas.append("canal")
-            job.fallo_publicacion(PASO, RuntimeError("HTTP 500"))
+            job._avisar_canal("uno")
+            job._avisar_canal("uno")
+            return None
         return paso
+    reportes: list = []
 
-    codigo, llamadas = _correr(monkeypatch, tmp_path, canal)
+    _correr(monkeypatch, tmp_path, canal, reportes=reportes)
 
-    assert llamadas == ["ventas", "canal", "reglas"], "las reglas corrieron despues del fallo"
-    assert codigo == 1, "como cualquier paso: la carga queda marcada incompleta"
-    assert [f["paso"] for f in job._FALLOS] == [PASO]
+    assert reportes[0]["avisos"].count("uno") == 1

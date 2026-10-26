@@ -31,6 +31,7 @@ import re
 import sys
 import time
 import datetime as dt
+from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -680,6 +681,46 @@ _OBLIGATORIAS_CANAL = [k for k in _COLUMNAS_CANAL if k not in _OPCIONALES_CANAL]
 # (el 2025 trae la fecha como serial de Excel y el 2026 como datetime: un formato
 # nuevo dejaria el archivo entero sin fecha, y eso no puede pasar en silencio).
 MAX_SIN_FECHA_CANAL = 0.01
+# Lo mismo para el Periodo: una celda que no es AAAAMM (texto "2026-09", una fecha)
+# deja la linea fuera sin ruido, y un formato nuevo se llevaria el archivo entero.
+MAX_SIN_PERIODO_CANAL = 0.01
+# Cuanto de lo que se manda puede descartar la plataforma antes de avisar.
+MAX_IGNORADAS_CANAL = 0.01
+
+# Lo que el canal digital tiene que decir sin ser un fallo. Va a la consola y, desde
+# `_correr`, a los avisos de la corrida (el panel de Fuentes de datos).
+_AVISOS_CANAL: list[str] = []
+
+
+class RespaldoCanalInvalido(ValueError):
+    """El respaldo no sirve para el canal digital (faltan columnas, cambio de formato).
+
+    Clase propia y no un ValueError cualquiera: `_es_transitorio` busca codigos HTTP
+    como subcadena del texto, y los conteos del mensaje ("502 de 502 lineas") los
+    imitan. Un respaldo mal armado no se arregla reintentando.
+    """
+
+
+def _avisar_canal(texto: str) -> None:
+    print(f"  (canal digital: {texto})")
+    if texto not in _AVISOS_CANAL:
+        _AVISOS_CANAL.append(texto)
+
+
+def _detalle_http(e: Exception) -> str:
+    """Lo que dijo la plataforma en una respuesta de error, acotado.
+
+    `raise_for_status` solo trae la linea de estado; el motivo (un envio parcial, un
+    campo renombrado) viene en el cuerpo.
+    """
+    r = getattr(e, "response", None)
+    if r is None:
+        return ""
+    try:
+        d = r.json().get("detail")
+    except Exception:  # noqa: BLE001 - un cuerpo que no es JSON no debe tapar el error de verdad
+        d = r.text
+    return f" Respuesta: {str(d)[:300]}" if d else ""
 
 
 def _texto_canal(v) -> str:
@@ -776,24 +817,39 @@ def _leer_lineas_canal(ruta: Path, desde: str, hasta: str) -> tuple[list[dict], 
                 faltan_menos = faltan
         if ix is None:
             faltan_menos = faltan_menos or [_COLUMNAS_CANAL[k] for k in _OBLIGATORIAS_CANAL]
-            raise ValueError(
+            raise RespaldoCanalInvalido(
                 f"El respaldo '{ruta.name}' no trae las columnas que necesita el canal "
                 f"digital: faltan {', '.join(faltan_menos)}. No se publico nada del canal.")
 
         ancho = max(ix.values())
         j_doc, j_nro = ix.get("doc_ref"), ix.get("nro_doc_ref")
         lineas: list[dict] = []
-        res = {"sin_fecha": 0, "sin_producto": 0, "ejemplo_fecha": None}
+        # Todo lo que se descarta se cuenta: un respaldo que cambio de formato no
+        # puede dejar el canal "al dia" en silencio. `del_canal` son las filas de los
+        # cuatro tipos de venta, en cualquier mes; `otros_tipos`, lo que hay en la
+        # ventana con otro tipo de venta (para ver si el canal cambio de nombre).
+        res = {"sin_fecha": 0, "sin_producto": 0, "ejemplo_fecha": None,
+               "del_canal": 0, "periodo_ilegible": 0, "ejemplo_periodo": None,
+               "otros_tipos": Counter(), "nc": 0,
+               "con_referencia": j_doc is not None and j_nro is not None}
         for fila in filas:  # el iterador sigue DESPUES del encabezado
             if not fila:
                 continue
             if len(fila) <= ancho:
                 fila = tuple(fila) + (None,) * (ancho + 1 - len(fila))
             tipo_venta = _texto_canal(fila[ix["tipo_venta"]])
-            if tipo_venta not in TIPOS_VENTA_CANAL_DIGITAL:
-                continue
             periodo = _texto_canal(fila[ix["periodo"]])
-            if len(periodo) != 6 or not periodo.isdigit() or not desde < periodo <= hasta:
+            legible = len(periodo) == 6 and periodo.isdigit()
+            if tipo_venta not in TIPOS_VENTA_CANAL_DIGITAL:
+                if legible and desde < periodo <= hasta:
+                    res["otros_tipos"][tipo_venta or "(vacio)"] += 1
+                continue
+            res["del_canal"] += 1
+            if not legible:
+                res["periodo_ilegible"] += 1
+                res["ejemplo_periodo"] = res["ejemplo_periodo"] or repr(fila[ix["periodo"]])[:40]
+                continue
+            if not desde < periodo <= hasta:
                 continue
             producto = fila[ix["producto"]]
             if producto is None or not str(producto).strip():
@@ -805,7 +861,7 @@ def _leer_lineas_canal(ruta: Path, desde: str, hasta: str) -> tuple[list[dict], 
                 res["ejemplo_fecha"] = res["ejemplo_fecha"] or repr(fila[ix["fecha"]])[:40]
                 continue
 
-            lineas.append({
+            linea = {
                 "periodo": periodo,
                 "tipo_docto": _texto_canal(fila[ix["tipo_docto"]]),
                 "numero": _texto_canal(fila[ix["numero"]]),
@@ -816,18 +872,32 @@ def _leer_lineas_canal(ruta: Path, desde: str, hasta: str) -> tuple[list[dict], 
                 "costo_neto": _numero_canal(fila[ix["costo_neto"]]),
                 "doc_ref": _texto_canal(fila[j_doc]) if j_doc is not None else "",
                 "nro_doc_ref": _texto_canal(fila[j_nro]) if j_nro is not None else "",
-            })
+            }
+            res["nc"] += linea["tipo_docto"].upper().startswith("NC")
+            lineas.append(linea)
         return lineas, res
     finally:
         wb.close()
+
+
+def _ignoradas_canal(d: dict) -> str:
+    """Los motivos con que la plataforma descarto lineas, para el aviso."""
+    est = d.get("estadisticas")
+    if not isinstance(est, dict):
+        return ""
+    partes = [f"{k}: {v}" for k, v in est.items()
+              if v and (k.startswith("ignoradas") or k.startswith("invalida"))]
+    return f" ({', '.join(partes)})" if partes else ""
 
 
 def publicar_ventas_canal_digital(bodega: str = "430", *, hoy: date | None = None) -> dict | None:
     """Sube a la plataforma las LINEAS de venta del canal digital que le faltan.
 
     Es el mismo patron que `publicar_ventas_historicas`: se le pregunta a la
-    plataforma hasta que periodo tiene, se suben solo los meses CERRADOS
-    posteriores y en un dia normal no sube nada (ni siquiera abre el respaldo).
+    plataforma hasta que periodo tiene LINEAS (`lineas_periodo_hasta` del meta: el
+    `periodo_hasta` sale de la venta ya armada, que tambien puede venir de una carga
+    manual sin lineas), se suben solo los meses CERRADOS posteriores y en un dia
+    normal no sube nada (ni siquiera abre el respaldo).
 
     Se manda la linea del documento y no la venta agregada: una nota de credito de
     noviembre puede anular una venta de octubre, y solo la plataforma, que guarda
@@ -840,11 +910,21 @@ def publicar_ventas_canal_digital(bodega: str = "430", *, hoy: date | None = Non
 
     Si faltan columnas del respaldo no se publica nada: ni siquiera los meses que
     estuvieran bien, porque quedar a medias es peor que no publicar.
+
+    Solo es FALLO (`fallo_publicacion`) lo que se arregla reintentando: un corte de
+    red, un reinicio de Render. El canal no alimenta el sugerido ni ninguna de las
+    tablas que se publican junto con el, y como fallo dejaria la corrida
+    "incompleta": codigo 1, la tarjeta roja, la incidencia diciendo que el sugerido
+    NO se actualizo (aca es falso) y la tarea de inicio de sesion relanzando el
+    motor entero (~30 min) cada vez. Un respaldo mal armado o un rechazo de la
+    plataforma queda como AVISO (consola y panel de Fuentes de datos) y se vuelve a
+    intentar en la corrida siguiente.
     """
     from urllib.parse import quote
 
     import httpx
 
+    _AVISOS_CANAL.clear()
     base, email, password = _credenciales()
     if not email or not password:
         return None
@@ -866,41 +946,122 @@ def publicar_ventas_canal_digital(bodega: str = "430", *, hoy: date | None = Non
                 print("  (canal digital: la plataforma todavia no tiene el modulo, se omite)")
                 return None
             r.raise_for_status()
-            ultimo = str(r.json().get("periodo_hasta") or "000000")
+            meta = r.json()
+            if "lineas_periodo_hasta" in meta:
+                ultimo = str(meta["lineas_periodo_hasta"] or "000000")
+            else:
+                # Plataforma anterior a ese campo: su `periodo_hasta` mira la venta,
+                # que pudo cargarse a mano sin lineas, y con el motor se daria por
+                # al dia sin haber subido ninguna. Se manda todo: el endpoint
+                # reemplaza por periodo, asi que repetir un mes es inofensivo.
+                ultimo = "000000"
+                _avisar_canal("la plataforma no informa hasta que mes tiene lineas "
+                              "(falta lineas_periodo_hasta en el meta): se envian todos los "
+                              "meses del respaldo.")
             if ultimo >= ultimo_cerrado:
                 return {"lineas_cargadas": 0, "periodos": [], "al_dia": True}
 
             # Se lee y valida TODO antes del primer POST.
             por_mes: dict[str, list[dict]] = {}
+            origen: dict[str, str] = {}
+            otros_tipos: Counter = Counter()
+            ilegibles = 0
             for ruta in archivos:
                 lineas, res = _leer_lineas_canal(ruta, ultimo, ultimo_cerrado)
                 total = len(lineas) + res["sin_fecha"]
                 if res["sin_fecha"] and res["sin_fecha"] / total > MAX_SIN_FECHA_CANAL:
-                    raise ValueError(
+                    raise RespaldoCanalInvalido(
                         f"El respaldo '{ruta.name}' trae {res['sin_fecha']} de {total} lineas del "
                         f"canal digital sin una fecha legible (ej. {res['ejemplo_fecha']}): parece "
                         "que cambio de formato. No se publico nada del canal.")
+                if (res["periodo_ilegible"]
+                        and res["periodo_ilegible"] / res["del_canal"] > MAX_SIN_PERIODO_CANAL):
+                    raise RespaldoCanalInvalido(
+                        f"El respaldo '{ruta.name}' trae {res['periodo_ilegible']} de "
+                        f"{res['del_canal']} lineas del canal digital con un Periodo que no es "
+                        f"AAAAMM (ej. {res['ejemplo_periodo']}): parece que cambio de formato. "
+                        "No se publico nada del canal.")
                 if res["sin_fecha"] or res["sin_producto"]:
                     print(f"  (canal digital, '{ruta.name}': se omitieron {res['sin_fecha']} lineas "
                           f"sin fecha legible y {res['sin_producto']} sin producto)")
+                if res["periodo_ilegible"]:
+                    _avisar_canal(f"'{ruta.name}': se omitieron {res['periodo_ilegible']} lineas "
+                                  f"con un Periodo que no es AAAAMM (ej. {res['ejemplo_periodo']})")
+                if res["nc"] and not res["con_referencia"]:
+                    # Sin referencia la plataforma no puede emparejar la devolucion con
+                    # su venta: la nota resta en la semana de la nota y no en la de la venta.
+                    _avisar_canal(f"'{ruta.name}' no trae las columnas de documento de referencia: "
+                                  f"las {res['nc']} notas de credito no se pueden emparejar con su venta")
+                ilegibles += res["periodo_ilegible"]
+                otros_tipos.update(res["otros_tipos"])
+
+                de_este: dict[str, list[dict]] = {}
                 for l in lineas:
-                    por_mes.setdefault(l["periodo"], []).append(l)
+                    de_este.setdefault(l["periodo"], []).append(l)
+                for periodo, ls in de_este.items():
+                    previo = por_mes.get(periodo)
+                    if previo is not None:
+                        # El endpoint guarda todas las lineas que le llegan y despues solo
+                        # se suben periodos posteriores: un mes duplicado no se corregiria
+                        # solo. Cada periodo sale de UN respaldo, el que mas lineas trae.
+                        gana = ruta.name if len(ls) > len(previo) else origen[periodo]
+                        _avisar_canal(f"el periodo {periodo} esta en dos respaldos "
+                                      f"('{origen[periodo]}': {len(previo)} lineas, "
+                                      f"'{ruta.name}': {len(ls)}): se usa solo '{gana}' "
+                                      "para no duplicar las ventas")
+                        if len(ls) <= len(previo):
+                            continue
+                    por_mes[periodo], origen[periodo] = ls, ruta.name
 
             if not por_mes:
-                return {"lineas_cargadas": 0, "periodos": [], "al_dia": True}
+                # Hay meses cerrados por subir y el respaldo no trae ninguna linea del
+                # canal para ellos: no esta "al dia". Puede ser que todavia no peguen el
+                # mes, o que el respaldo cambio (un Periodo que no se lee, un canal con
+                # otro nombre): el detalle lo dice sin adivinar cual.
+                causas = []
+                if ilegibles:
+                    causas.append(f"{ilegibles} lineas del canal con un Periodo que no es AAAAMM")
+                if otros_tipos:
+                    top = ", ".join(f"{t} ({n})" for t, n in otros_tipos.most_common(5))
+                    causas.append(f"en esos meses hay ventas de otros tipos: {top}")
+                tiene = f"tiene lineas hasta {ultimo}" if ultimo != "000000" else "no tiene lineas"
+                _avisar_canal(
+                    f"la plataforma {tiene} y el ultimo mes cerrado es {ultimo_cerrado}, "
+                    "pero el respaldo no trae lineas del canal para los meses que faltan"
+                    + (f" ({'; '.join(causas)})" if causas else "") + ".")
+                return {"lineas_cargadas": 0, "periodos": [], "al_dia": False,
+                        "pendiente": ultimo_cerrado}
 
             cargadas, periodos = 0, []
-            for periodo in sorted(por_mes):
+            for i, periodo in enumerate(sorted(por_mes)):
+                enviadas = len(por_mes[periodo])
                 r = c.post(
                     f"{base}/api/canal-digital/lineas",
                     headers=cab, json={"bodega": bodega, "lineas": por_mes[periodo]},
                 )
+                if i == 0 and r.status_code in (404, 405):
+                    # Plataforma con el meta pero sin /lineas (el motor salio antes que el
+                    # deploy): no es un fallo. Solo en el primer POST; un 404 a mitad es un error.
+                    print("  (canal digital: la plataforma todavia no recibe lineas, se omite)")
+                    return None
                 r.raise_for_status()
                 d = r.json()
-                cargadas += d.get("lineas_cargadas", 0)
-                periodos.extend(d.get("periodos") or [periodo])
+                n_ok, n_ign = d.get("lineas_cargadas") or 0, d.get("lineas_ignoradas") or 0
+                if not n_ok:
+                    _avisar_canal(f"la plataforma no cargo ninguna de las {enviadas} lineas de "
+                                  f"{periodo}{_ignoradas_canal(d)}")
+                elif n_ign / enviadas > MAX_IGNORADAS_CANAL:
+                    _avisar_canal(f"la plataforma ignoro {n_ign} de las {enviadas} lineas de "
+                                  f"{periodo}{_ignoradas_canal(d)}")
+                cargadas += n_ok
+                periodos.extend(d.get("periodos") or [])  # solo lo que la plataforma dice haber cargado
             return {"lineas_cargadas": cargadas, "periodos": periodos, "al_dia": False}
     except Exception as e:  # noqa: BLE001 - publicar el canal digital nunca debe romper la carga
+        if isinstance(e, RespaldoCanalInvalido) or not _es_transitorio(e):
+            texto = str(e) if isinstance(e, RespaldoCanalInvalido) else (
+                f"no se pudo publicar las ventas del canal ({type(e).__name__}: {e}).")
+            _avisar_canal(texto + _detalle_http(e) + " Se reintenta en la corrida siguiente.")
+            return None
         fallo_publicacion("las ventas del canal digital", e)
         return None
 
@@ -2337,15 +2498,22 @@ def _correr(corrida: dict, oficial: bool = False, ignorar_frescura: bool = False
             print(f"  ventas publicadas: {vta.get('filas_cargadas')} filas "
                   f"(periodos {', '.join(vta.get('periodos') or [])}).")
         # Las lineas de venta del canal digital (bodega 430): igual que las ventas,
-        # solo los meses cerrados que la plataforma no tenga. Un fallo aca queda
-        # anotado como el de cualquier paso y no frena los que siguen.
+        # solo los meses cerrados que la plataforma no tenga. Solo un fallo de los
+        # que se arreglan reintentando (red, Render) queda anotado como el de
+        # cualquier paso; el resto sale como aviso y no frena la corrida.
         cdg = publicar_con_reintentos("las ventas del canal digital",
                                       publicar_ventas_canal_digital)
         if cdg and cdg.get("al_dia"):
             print("  canal digital: la plataforma ya esta al dia.")
+        elif cdg and cdg.get("pendiente"):
+            print(f"  canal digital: faltan meses hasta {cdg['pendiente']} y el respaldo no los "
+                  "trae; la plataforma queda como estaba.")
         elif cdg:
             print(f"  canal digital: {cdg.get('lineas_cargadas')} lineas publicadas "
-                  f"(periodos {', '.join(cdg.get('periodos') or [])}).")
+                  f"(periodos {', '.join(cdg.get('periodos') or []) or 'ninguno'}).")
+        # Los avisos del canal van al panel de Fuentes de datos con los demas de la corrida.
+        avisos = corrida.setdefault("avisos", [])
+        avisos.extend([a for a in _AVISOS_CANAL if a not in avisos])
         # Las reglas de sugerencias manuales, con el sugerido, el stock y el
         # transito de hoy ya arriba.
         reg = publicar_con_reintentos("las reglas de sugerencias manuales",
