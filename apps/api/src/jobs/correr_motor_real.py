@@ -25,7 +25,9 @@ Configuracion (por entorno, nunca en el repo):
 from __future__ import annotations
 
 import argparse
+import math
 import os
+import re
 import sys
 import time
 import datetime as dt
@@ -646,6 +648,260 @@ def publicar_ventas_historicas() -> dict | None:
             return {"filas_cargadas": cargadas, "periodos": periodos, "al_dia": False}
     except Exception as e:  # noqa: BLE001 - publicar las ventas nunca debe romper la carga
         fallo_publicacion("las ventas", e)
+        return None
+
+
+# Los tipos de venta del canal digital: los mismos que la plataforma deja por
+# defecto en la bodega. El servidor vuelve a filtrar por los de la bodega; aca se
+# filtra antes para no subirle lineas de otros negocios que no usa.
+TIPOS_VENTA_CANAL_DIGITAL = ("VTA ML", "VTA SHOPIFY", "VTA WALMART", "VTA PARIS")
+
+# Campo del contrato -> columna del respaldo de ventas.
+_COLUMNAS_CANAL = {
+    "periodo": "Periodo",
+    "tipo_docto": "tipoDocto",
+    "numero": "Numero",
+    "fecha": "Fecha",
+    "tipo_venta": "Tipo-Venta",
+    "producto": "Producto",
+    "cantidad": "Cantidad",
+    "costo_neto": "Costo Neto",
+    "doc_ref": "Documento Referencia",
+    "nro_doc_ref": "Nro Documento Referencia",
+}
+# Las dos de referencia no existen en un respaldo antiguo: salen vacias. Sin
+# alguna de las otras no se publica: sin el numero o la fecha la plataforma no
+# puede emparejar una devolucion con su venta.
+_OPCIONALES_CANAL = ("doc_ref", "nro_doc_ref")
+_OBLIGATORIAS_CANAL = [k for k in _COLUMNAS_CANAL if k not in _OPCIONALES_CANAL]
+
+# Cuanto de las lineas del canal puede llegar sin fecha legible. Unas pocas filas
+# raras se omiten y se avisan; mas que esto es que el respaldo cambio de formato
+# (el 2025 trae la fecha como serial de Excel y el 2026 como datetime: un formato
+# nuevo dejaria el archivo entero sin fecha, y eso no puede pasar en silencio).
+MAX_SIN_FECHA_CANAL = 0.01
+
+
+def _texto_canal(v) -> str:
+    """Celda -> texto, sin el ".0" que deja un numero guardado como decimal."""
+    if v is None or isinstance(v, bool):
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    t = str(v).strip()
+    return re.sub(r"\.0+$", "", t) if "." in t else t
+
+
+def _numero_canal(v) -> float:
+    """Celda -> numero. Vacio o ilegible cuenta como cero, igual que la venta en blanco."""
+    if v is None or isinstance(v, bool):
+        return 0.0
+    if isinstance(v, (int, float)):
+        x = float(v)
+    else:
+        t = str(v).strip()
+        if "," in t:  # "1.234,5": punto de miles y coma decimal
+            t = t.replace(".", "").replace(",", ".")
+        try:
+            x = float(t)
+        except ValueError:
+            return 0.0
+    return x if math.isfinite(x) else 0.0
+
+
+def _fecha_canal(v) -> str | None:
+    """Celda de fecha -> "YYYY-MM-DD", o None si no se entiende.
+
+    Los respaldos no vienen todos iguales: datetime, serial de Excel (45684 =
+    27-ene-2025) o texto dd-mm-aaaa / dd/mm/aaaa / ISO. Es la misma regla de
+    `lectores_excel._a_fecha`, que trabaja sobre columnas de texto de polars y
+    aca no sirve: se lee fila a fila y la celda llega con su tipo.
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, dt.datetime):
+        return v.date().isoformat()
+    if isinstance(v, dt.date):
+        return v.isoformat()
+    t = str(v).strip()
+    if isinstance(v, (int, float)) or re.fullmatch(r"\d+(\.\d+)?", t):
+        serial = float(t)
+        # El rango acota a fechas plausibles: un numero suelto no es una fecha.
+        if 20000 <= serial <= 80000:
+            return (dt.date(1899, 12, 30) + timedelta(days=int(serial))).isoformat()
+        return None
+    m = re.match(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", t)
+    if m:
+        for formato in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                return dt.datetime.strptime(m.group(0), formato).date().isoformat()
+            except ValueError:
+                pass
+    return None
+
+
+def _leer_lineas_canal(ruta: Path, desde: str, hasta: str) -> tuple[list[dict], dict]:
+    """Las lineas del canal digital de UN respaldo, con periodo en (desde, hasta].
+
+    Lee fila a fila y guarda solo lo que sirve: un respaldo anual pesa decenas de
+    MB y casi todo es de otros tipos de venta. No normaliza el producto: lo hace el
+    servidor. Sin las columnas minimas no devuelve nada a medias: falla diciendo
+    cuales faltan.
+    """
+    from ..motor import lectores_excel as lx
+
+    wb, ws = lx._abrir_hoja(ruta)
+    try:
+        filas = ws.iter_rows(values_only=True)
+        ix: dict[str, int] | None = None
+        faltan_menos: list[str] | None = None
+        for i, fila in enumerate(filas):
+            if i >= lx.MAX_FILAS_ESCANEO:
+                break
+            exactos: dict[str, int] = {}
+            normalizados: dict[str, int] = {}
+            for j, v in enumerate(fila):
+                if v is not None:
+                    exactos.setdefault(str(v).strip(), j)
+                    normalizados.setdefault(lx._norm(v), j)
+            hallados = {
+                k: j for k, nombre in _COLUMNAS_CANAL.items()
+                if (j := lx._indice_de(nombre, exactos, normalizados)) is not None
+            }
+            faltan = [_COLUMNAS_CANAL[k] for k in _OBLIGATORIAS_CANAL if k not in hallados]
+            if not faltan:
+                ix = hallados
+                break
+            if faltan_menos is None or len(faltan) < len(faltan_menos):
+                faltan_menos = faltan
+        if ix is None:
+            faltan_menos = faltan_menos or [_COLUMNAS_CANAL[k] for k in _OBLIGATORIAS_CANAL]
+            raise ValueError(
+                f"El respaldo '{ruta.name}' no trae las columnas que necesita el canal "
+                f"digital: faltan {', '.join(faltan_menos)}. No se publico nada del canal.")
+
+        ancho = max(ix.values())
+        j_doc, j_nro = ix.get("doc_ref"), ix.get("nro_doc_ref")
+        lineas: list[dict] = []
+        res = {"sin_fecha": 0, "sin_producto": 0, "ejemplo_fecha": None}
+        for fila in filas:  # el iterador sigue DESPUES del encabezado
+            if not fila:
+                continue
+            if len(fila) <= ancho:
+                fila = tuple(fila) + (None,) * (ancho + 1 - len(fila))
+            tipo_venta = _texto_canal(fila[ix["tipo_venta"]])
+            if tipo_venta not in TIPOS_VENTA_CANAL_DIGITAL:
+                continue
+            periodo = _texto_canal(fila[ix["periodo"]])
+            if len(periodo) != 6 or not periodo.isdigit() or not desde < periodo <= hasta:
+                continue
+            producto = fila[ix["producto"]]
+            if producto is None or not str(producto).strip():
+                res["sin_producto"] += 1
+                continue
+            fecha = _fecha_canal(fila[ix["fecha"]])
+            if fecha is None:
+                res["sin_fecha"] += 1
+                res["ejemplo_fecha"] = res["ejemplo_fecha"] or repr(fila[ix["fecha"]])[:40]
+                continue
+
+            lineas.append({
+                "periodo": periodo,
+                "tipo_docto": _texto_canal(fila[ix["tipo_docto"]]),
+                "numero": _texto_canal(fila[ix["numero"]]),
+                "fecha": fecha,
+                "tipo_venta": tipo_venta,
+                "producto": producto if isinstance(producto, str) else _texto_canal(producto),
+                "cantidad": _numero_canal(fila[ix["cantidad"]]),
+                "costo_neto": _numero_canal(fila[ix["costo_neto"]]),
+                "doc_ref": _texto_canal(fila[j_doc]) if j_doc is not None else "",
+                "nro_doc_ref": _texto_canal(fila[j_nro]) if j_nro is not None else "",
+            })
+        return lineas, res
+    finally:
+        wb.close()
+
+
+def publicar_ventas_canal_digital(bodega: str = "430", *, hoy: date | None = None) -> dict | None:
+    """Sube a la plataforma las LINEAS de venta del canal digital que le faltan.
+
+    Es el mismo patron que `publicar_ventas_historicas`: se le pregunta a la
+    plataforma hasta que periodo tiene, se suben solo los meses CERRADOS
+    posteriores y en un dia normal no sube nada (ni siquiera abre el respaldo).
+
+    Se manda la linea del documento y no la venta agregada: una nota de credito de
+    noviembre puede anular una venta de octubre, y solo la plataforma, que guarda
+    todas las lineas, puede emparejarlas. Por eso el motor no resuelve nada de eso.
+
+    UN request por mes: el endpoint borra el periodo antes de insertar, asi que
+    partir un mes en dos haria que el segundo se llevara lo que subio el primero.
+    Y solo meses cerrados: el mes en curso llega incompleto, y como despues solo se
+    suben periodos posteriores al ultimo cargado, nunca se corregiria.
+
+    Si faltan columnas del respaldo no se publica nada: ni siquiera los meses que
+    estuvieran bien, porque quedar a medias es peor que no publicar.
+    """
+    from urllib.parse import quote
+
+    import httpx
+
+    base, email, password = _credenciales()
+    if not email or not password:
+        return None
+
+    fin_mes_cerrado = _fin_mes_cerrado(hoy or date.today())
+    archivos = _archivos_de_ventas(fin_mes_cerrado)
+    if not archivos:
+        return None
+    ultimo_cerrado = (fin_mes_cerrado - timedelta(days=1)).strftime("%Y%m")
+
+    try:
+        with httpx.Client(timeout=600) as c:
+            token = _token(c, base, email, password)
+            cab = {"Authorization": f"Bearer {token}"}
+
+            r = c.get(f"{base}/api/canal-digital/meta?bodega={quote(str(bodega))}", headers=cab)
+            if r.status_code == 404:
+                # Plataforma sin el modulo desplegado todavia: no es un fallo.
+                print("  (canal digital: la plataforma todavia no tiene el modulo, se omite)")
+                return None
+            r.raise_for_status()
+            ultimo = str(r.json().get("periodo_hasta") or "000000")
+            if ultimo >= ultimo_cerrado:
+                return {"lineas_cargadas": 0, "periodos": [], "al_dia": True}
+
+            # Se lee y valida TODO antes del primer POST.
+            por_mes: dict[str, list[dict]] = {}
+            for ruta in archivos:
+                lineas, res = _leer_lineas_canal(ruta, ultimo, ultimo_cerrado)
+                total = len(lineas) + res["sin_fecha"]
+                if res["sin_fecha"] and res["sin_fecha"] / total > MAX_SIN_FECHA_CANAL:
+                    raise ValueError(
+                        f"El respaldo '{ruta.name}' trae {res['sin_fecha']} de {total} lineas del "
+                        f"canal digital sin una fecha legible (ej. {res['ejemplo_fecha']}): parece "
+                        "que cambio de formato. No se publico nada del canal.")
+                if res["sin_fecha"] or res["sin_producto"]:
+                    print(f"  (canal digital, '{ruta.name}': se omitieron {res['sin_fecha']} lineas "
+                          f"sin fecha legible y {res['sin_producto']} sin producto)")
+                for l in lineas:
+                    por_mes.setdefault(l["periodo"], []).append(l)
+
+            if not por_mes:
+                return {"lineas_cargadas": 0, "periodos": [], "al_dia": True}
+
+            cargadas, periodos = 0, []
+            for periodo in sorted(por_mes):
+                r = c.post(
+                    f"{base}/api/canal-digital/lineas",
+                    headers=cab, json={"bodega": bodega, "lineas": por_mes[periodo]},
+                )
+                r.raise_for_status()
+                d = r.json()
+                cargadas += d.get("lineas_cargadas", 0)
+                periodos.extend(d.get("periodos") or [periodo])
+            return {"lineas_cargadas": cargadas, "periodos": periodos, "al_dia": False}
+    except Exception as e:  # noqa: BLE001 - publicar el canal digital nunca debe romper la carga
+        fallo_publicacion("las ventas del canal digital", e)
         return None
 
 
@@ -2080,6 +2336,16 @@ def _correr(corrida: dict, oficial: bool = False, ignorar_frescura: bool = False
         elif vta:
             print(f"  ventas publicadas: {vta.get('filas_cargadas')} filas "
                   f"(periodos {', '.join(vta.get('periodos') or [])}).")
+        # Las lineas de venta del canal digital (bodega 430): igual que las ventas,
+        # solo los meses cerrados que la plataforma no tenga. Un fallo aca queda
+        # anotado como el de cualquier paso y no frena los que siguen.
+        cdg = publicar_con_reintentos("las ventas del canal digital",
+                                      publicar_ventas_canal_digital)
+        if cdg and cdg.get("al_dia"):
+            print("  canal digital: la plataforma ya esta al dia.")
+        elif cdg:
+            print(f"  canal digital: {cdg.get('lineas_cargadas')} lineas publicadas "
+                  f"(periodos {', '.join(cdg.get('periodos') or [])}).")
         # Las reglas de sugerencias manuales, con el sugerido, el stock y el
         # transito de hoy ya arriba.
         reg = publicar_con_reintentos("las reglas de sugerencias manuales",
