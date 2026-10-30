@@ -9,7 +9,8 @@ compra (agregada para el CD, local para sucursales) es A/B; si no, 0.
 - ST (tránsito) suma OCs pendientes vigentes SOLO del producto master (la
   relación bidireccional del modelo anula la expansión de reemplazos): Curifor
   Nacional con motivo reposicion <=30 días, Curifor Importado <=180, Frontera
-  Nacional por documento base <=30.
+  Nacional por documento base <=30. Un proveedor nacional puede tener un tope
+  propio en días hábiles (`P.TRANSITO_DIAS_HABILES_POR_RUT`).
 
 Todas las comparaciones de texto van en minúscula: DAX es case-insensitive.
 """
@@ -57,6 +58,29 @@ def _stock_activo(miembros: pl.DataFrame, stock: pl.DataFrame, stock_frontera: p
     )
 
 
+def _vencida_por_proveedor(seg: pl.DataFrame, hoy: date) -> pl.Expr:
+    """OC de un proveedor con tope propio que ya lo pasó.
+
+    Los días hábiles se cuentan como `dias_habiles` del job: lunes a viernes, sin
+    el día de la OC y con el de hoy. El seguimiento que viene del SQL no trae el
+    RUT: ahí la excepción no aplica.
+    """
+    if "RutProveedor" not in seg.columns:
+        return pl.lit(False)
+    rut = (
+        pl.col("RutProveedor").cast(pl.Utf8)
+        .str.replace_all(r"[.\s]", "")
+        .str.to_uppercase()
+    )
+    dias = pl.business_day_count(
+        pl.col("FechaOC").dt.offset_by("1d"), pl.lit(hoy).dt.offset_by("1d")
+    )
+    vencida = pl.lit(False)
+    for rut_proveedor, tope in P.TRANSITO_DIAS_HABILES_POR_RUT.items():
+        vencida = vencida | ((rut == rut_proveedor) & (dias > tope)).fill_null(False)
+    return vencida
+
+
 def _stock_transito(
     seg: pl.DataFrame, hoy: date, *, con_fecha: bool = False,
     miembros: pl.DataFrame | None = None,
@@ -92,7 +116,11 @@ def _stock_transito(
         (estado_oc == "pendiente")
         & pl.col("FechaOC").is_not_null()
         & (
-            ((origen == "curifor nacional") & (motivo == P.MOTIVO_REPOSICION) & (dias_oc <= P.TRANSITO_VENTANA_NACIONAL_DIAS))
+            (
+                (origen == "curifor nacional") & (motivo == P.MOTIVO_REPOSICION)
+                & (dias_oc <= P.TRANSITO_VENTANA_NACIONAL_DIAS)
+                & ~_vencida_por_proveedor(seg, hoy)
+            )
             | ((origen == "curifor importado") & (dias_oc <= P.TRANSITO_VENTANA_IMPORTADO_DIAS))
         )
     )

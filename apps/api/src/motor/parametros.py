@@ -192,6 +192,11 @@ LT_PERCENTIL_OUTLIER = 0.90
 # Tránsito: solo OC con estado Pendiente dentro de la ventana de vigencia.
 TRANSITO_VENTANA_NACIONAL_DIAS = 30
 TRANSITO_VENTANA_IMPORTADO_DIAS = 180
+# Excepcion a la ventana nacional: RUT -> tope en dias habiles (lunes a viernes, sin
+# descontar feriados). Si la ventana general es mas corta, manda la general.
+TRANSITO_DIAS_HABILES_POR_RUT = {
+    "79649140-K": 5,  # Automotores Gildemeister (pedido de Abastecimiento, 30-10-2026)
+}
 
 # Filtro base de motivo aplicado a Seguimiento de Compras en TODO el modelo:
 # Origen <> "Curifor Nacional" OR Motivo == "reposicion" (SIEMPRE minúscula;

@@ -296,7 +296,7 @@ def normalizar_seguimiento(
 
     Modo (excluyentes):
       base (default)      -> `seguimiento`: Producto, SucursalID, RazonSocial, FechaOC, NOC, Origen, Motivo
-      para_transito=True  -> además Cantidad, EstadoOC, EstadoDoc, FechaDoc
+      para_transito=True  -> además Cantidad, EstadoOC, EstadoDoc, FechaDoc, RutProveedor
       para_lead_time=True -> `seguimiento_lt` (insumo de lead_time_proveedor):
           RazonSocial, SucursalID, FechaOC, FechaPE, Origen, Motivo
     """
@@ -310,7 +310,7 @@ def normalizar_seguimiento(
     else:
         cols = ["Producto", "SucursalID", "RazonSocial", "FechaOC", "NOC", "Origen", "Motivo"]
         if para_transito:
-            cols += ["Cantidad", "EstadoOC", "EstadoDoc", "FechaDoc"]
+            cols += ["Cantidad", "EstadoOC", "EstadoDoc", "FechaDoc", "RutProveedor"]
     faltan = [c for c in cols if c not in df.columns]
     if faltan:
         df = df.with_columns([pl.lit(None).alias(c) for c in faltan])

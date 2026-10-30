@@ -206,6 +206,7 @@ COLUMNAS_SEGUIMIENTO_NACIONAL = {
     # time por proveedor-sucursal.
     "Sucursal": "Sucursal",
     "RazonSocial": "Razón Social Proveedor",
+    "RutProveedor": "Rut Proveedor",
     "Motivo": "Motivo Compra",
     "FechaOC": "Fecha Orden de Compra",
     "NOC": "N° Orden de Compra",
