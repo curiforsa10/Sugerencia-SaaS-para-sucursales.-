@@ -47,7 +47,7 @@ $env:PYTHONIOENCODING = "utf-8"
 
 $REPO_GITHUB = "https://github.com/platoniaaa/Sugerencia-SaaS-para-sucursales.-.git"
 $RAMA_MOTOR = "arreglar-job-diario"
-$API_PRODUCCION = "https://sugerido-api.onrender.com"
+$API_PRODUCCION = "https://olataforma-sugerencias.onrender.com"
 $CUENTA_MOTOR = "admin@curifor.com"   # la cuenta con que el motor publica
 $TAREA_AGENTE = "Sugerido Curifor - Agente"
 

@@ -96,7 +96,7 @@ $secreto = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
     [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secretoSec))
 
 $apiUrl = $env:PLATAFORMA_API_URL
-if (-not $apiUrl) { $apiUrl = "https://sugerido-api.onrender.com" }
+if (-not $apiUrl) { $apiUrl = "https://olataforma-sugerencias.onrender.com" }
 
 # El .env vive fuera de OneDrive y esta en .gitignore: no se sincroniza ni se sube.
 $envFile = "$root\.env"

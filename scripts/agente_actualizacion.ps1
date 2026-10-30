@@ -72,7 +72,7 @@ if (Test-Path $envFile) {
     }
 }
 $apiUrl = $env:PLATAFORMA_API_URL
-if (-not $apiUrl) { $apiUrl = "https://sugerido-api.onrender.com" }
+if (-not $apiUrl) { $apiUrl = "https://olataforma-sugerencias.onrender.com" }
 $secreto = $env:AGENTE_SECRET
 if (-not $secreto) {
     Escribir "Sin AGENTE_SECRET en el .env: el agente no puede identificarse. Corre el instalador."

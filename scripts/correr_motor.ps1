@@ -42,7 +42,7 @@ if (Test-Path $envFile) {
         }
     }
 }
-if (-not $env:PLATAFORMA_API_URL) { $env:PLATAFORMA_API_URL = "https://sugerido-api.onrender.com" }
+if (-not $env:PLATAFORMA_API_URL) { $env:PLATAFORMA_API_URL = "https://olataforma-sugerencias.onrender.com" }
 if (-not $env:PLATAFORMA_EMAIL) {
     $env:PLATAFORMA_EMAIL = Read-Host "Correo de la plataforma"
 }
