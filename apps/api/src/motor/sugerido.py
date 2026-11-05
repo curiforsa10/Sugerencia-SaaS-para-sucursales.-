@@ -1,7 +1,7 @@
 """Sugerido de compra por sucursal (réplica del modelo DAX).
 
 Sugerido Suc = MAX(0, ROUND(DD*(CO+LT_ef) + SS - SA - ST, 0)) si la clase que
-compra (agregada para el CD, local para sucursales) es A/B; si no, 0.
+compra lo permite: agregada A/B en el CD, local A/B/C en las sucursales; si no, 0.
 - Necesidad Bruta = lo mismo SIN el flag de clase (la usan los traslados).
 - Punto de Pedido = ROUND(DD*LT_ef + SS, 0) — sin CO: define cuándo, no cuánto.
 - SA (stock activo) suma el stock del grupo de reemplazos (master + hijos) en
@@ -191,8 +191,8 @@ def calcular_sugerido(
     es_cd = pl.col("sucursal_final") == P.CD_ID
     compra = (
         pl.when(es_cd)
-        .then(pl.col("clasificacion_abc_agregada").is_in(["A", "B"]))
-        .otherwise(pl.col("clasificacion_abc").is_in(["A", "B"]))
+        .then(pl.col("clasificacion_abc_agregada").is_in(list(P.CLASES_QUE_COMPRAN)))
+        .otherwise(pl.col("clasificacion_abc").is_in(list(P.CLASES_QUE_COMPRAN_SUCURSAL)))
     )
 
     bruto = dd * (co + lt) + ss - pl.col("stock_activo") - pl.col("stock_transito")

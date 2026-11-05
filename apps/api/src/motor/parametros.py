@@ -222,8 +222,12 @@ def z_para(clase: str, es_importado_cd: bool) -> float:
 
 # En sucursal normal: Abastece CD = "Si" cuando el producto es importado O cuando
 # (clase local in {C,D} y clase agregada in {A,B}). En la fila del CD: "Si" solo
-# si es importado. El sugerido directo solo calcula para clases A/B.
+# si es importado. En el CD el sugerido directo calcula para la agregada A/B.
 CLASES_QUE_COMPRAN = {"A", "B"}
+# En las sucursales compra tambien la clase local C (Abastecimiento, 05-11-2026).
+# Desde ago-2026 el CD solo consolida la demanda de las D, asi que una C no la
+# compraba nadie: solo recibia traslado mientras al CD le quedara stock.
+CLASES_QUE_COMPRAN_SUCURSAL = {"A", "B", "C"}
 CLASES_LOCAL_RUTEADAS_CD = {"C", "D"}
 CLASES_AGG_QUE_CONSOLIDA_CD = {"A", "B"}
 

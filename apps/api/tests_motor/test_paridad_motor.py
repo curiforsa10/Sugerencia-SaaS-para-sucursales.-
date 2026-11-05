@@ -60,8 +60,9 @@ def _gestion(dias: int):
 def _como_el_dax():
     """El motor con las reglas que tenia el DAX cuando se congelaron los goldens.
 
-    Hoy son tres: el dia de gestion de Abastecimiento, la regla de centralizacion
-    en el CD y el lead time de fallback (era 8 dias, ahora 3). Se apagan aca para que los goldens sigan validando TODO lo demas;
+    Hoy son cuatro: el dia de gestion de Abastecimiento, la regla de centralizacion
+    en el CD, el lead time de fallback (era 8 dias, ahora 3) y la clase C que
+    compra en las sucursales. Se apagan aca para que los goldens sigan validando TODO lo demas;
     cada regla nueva tiene su propio test. Cada divergencia que se le agregue al
     motor se apaga en este mismo lugar.
     """
@@ -69,9 +70,11 @@ def _como_el_dax():
 
     clases, solo_d = P.CENTRALIZACION_CLASES_LOCALES, P.CENTRALIZACION_AGREGADA_SOLO_D
     fallback = P.LT_FALLBACK_DIAS
+    compran = P.CLASES_QUE_COMPRAN_SUCURSAL
     P.CENTRALIZACION_CLASES_LOCALES = ("C", "D")
     P.CENTRALIZACION_AGREGADA_SOLO_D = False
     P.LT_FALLBACK_DIAS = 8
+    P.CLASES_QUE_COMPRAN_SUCURSAL = {"A", "B"}
     try:
         with _gestion(0):
             yield
@@ -79,6 +82,7 @@ def _como_el_dax():
         P.CENTRALIZACION_CLASES_LOCALES = clases
         P.CENTRALIZACION_AGREGADA_SOLO_D = solo_d
         P.LT_FALLBACK_DIAS = fallback
+        P.CLASES_QUE_COMPRAN_SUCURSAL = compran
 
 
 def _calcular_etapas(fuentes):
