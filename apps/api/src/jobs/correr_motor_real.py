@@ -62,6 +62,10 @@ SALIDA_OC = _API_DIR / "data" / "oc_recientes_motor.csv"
 DIAS_OC_RECIENTES = 90
 SALIDA_COSTOS = _API_DIR / "data" / "costos_precios_motor.csv"
 SALIDA_COMPRAS = _API_DIR / "data" / "compras_precios_motor.csv"
+SALIDA_RECEPCIONES = _API_DIR / "data" / "recepciones_motor.csv"
+# Cuantos dias de recepciones se mandan: "en el año" para Abastecimiento son los
+# ultimos 12 meses (24-11-2026).
+DIAS_RECEPCIONES = 365
 # Cuando se publico por ultima vez el export del ERP (mtime del archivo). Son
 # 410 mil filas en 80 lotes: se manda solo cuando el archivo cambio.
 MARCA_LISTA_ERP = _API_DIR / "data" / "lista_erp_publicada.txt"
@@ -340,6 +344,8 @@ def construir_csv(hoy: date | None = None) -> Path:
     _guardar_stock_unificado(fuentes)
     _guardar_costos_precios(fuentes)
     _guardar_compras_precios()
+    # La ultima recepcion por producto y sucursal, para el requerimiento de sucursal.
+    _guardar_recepciones()
     # El transito de TODOS los productos, no solo de los que el sugerido evalua.
     _guardar_transito(fuentes)
     # Las OC recientes, para cerrar en la plataforma lo de una sola vez ya comprado.
@@ -1182,6 +1188,107 @@ def publicar_costos_precios() -> dict | None:
         for k in total:
             total[k] += int(r.get(k) or 0)
     return total
+
+
+def _guardar_recepciones(hoy=None) -> Path | None:
+    """Ultima recepcion de cada producto en cada sucursal, de los ultimos 12 meses.
+
+    La muestra el requerimiento de sucursal (Abastecimiento, 24-11-2026): si el
+    repuesto llego hace poco a esa sucursal o a otra parte de la empresa.
+
+    La fecha es la misma que usa la procedencia (`_guardar_compras_precios`): el
+    Documento P/E del nacional, la Recepcion de Frontera y la Recepcion del
+    importado. La sucursal se asigna con los mismos mapas que el transito; el
+    importado casi nunca la trae y va como DESCONOCIDO, que la plataforma cuenta
+    solo para la fecha de la empresa.
+    """
+    from datetime import date as _date, timedelta as _timedelta
+
+    import polars as pl
+
+    from ..motor import lectores_excel as lx
+    from ..motor.conectores import sql_flexline as sf
+
+    hoy = hoy or _date.today()
+    desde = hoy - _timedelta(days=DIAS_RECEPCIONES)
+    lecturas = (
+        ("seguimiento_curifor_nacional", lx.leer_seguimiento_nacional_excel,
+         sf.SUCURSAL_ID_MAP, "Sucursal"),
+        ("seguimiento_curifor_importado", lx.leer_seguimiento_importado_excel,
+         sf.SUCURSAL_ID_MAP_IMPORTADO, "Sucursal"),
+        ("seguimiento_frontera", lx.leer_seguimiento_frontera_excel,
+         sf.SUCURSAL_ID_MAP_FRONTERA, "NombreLocal"),
+    )
+    partes = []
+    for fuente, leer, mapa, col in lecturas:
+        ruta = _buscar(fuente, obligatorio=False)
+        if ruta is None:
+            continue
+        try:
+            df = leer(ruta)
+        except Exception as e:  # noqa: BLE001 - un seguimiento ilegible no frena el resto
+            print(f"    aviso: no pude leer {fuente} para las recepciones ({type(e).__name__}: {e})")
+            continue
+        if df.is_empty() or "FechaPE" not in df.columns:
+            continue
+        suc = (pl.col(col).replace_strict(mapa, default=sf.SUCURSAL_ID_DEFAULT)
+               if col in df.columns else pl.lit(sf.SUCURSAL_ID_DEFAULT))
+        partes.append(df.select(
+            pl.col("Producto").cast(pl.Utf8).str.strip_chars().alias("producto"),
+            suc.alias("sucursal_id"),
+            pl.col("FechaPE").alias("fecha"),
+        ))
+    if not partes:
+        return None
+    df = (
+        pl.concat(partes)
+        .filter(pl.col("producto").is_not_null() & (pl.col("producto") != "")
+                & pl.col("fecha").is_not_null()
+                & (pl.col("fecha") >= desde) & (pl.col("fecha") <= hoy))
+        .group_by(["producto", "sucursal_id"])
+        .agg(pl.col("fecha").max())
+        .sort(["producto", "sucursal_id"])
+    )
+    if df.is_empty():
+        return None
+    SALIDA_RECEPCIONES.parent.mkdir(parents=True, exist_ok=True)
+    df.write_csv(SALIDA_RECEPCIONES)
+    return SALIDA_RECEPCIONES
+
+
+def publicar_recepciones() -> dict | None:
+    """Sube la ultima recepcion por producto y sucursal (reemplaza la foto)."""
+    import csv
+
+    import httpx
+
+    if not SALIDA_RECEPCIONES.exists():
+        return None
+    base, email, password = _credenciales()
+    if not email or not password:
+        return None
+    with open(SALIDA_RECEPCIONES, encoding="utf-8", newline="") as f:
+        filas = [
+            {"producto": r["producto"], "sucursal_id": r.get("sucursal_id") or None,
+             "fecha": (r.get("fecha") or "")[:10]}
+            for r in csv.DictReader(f)
+            if r.get("producto") and r.get("fecha")
+        ]
+    if not filas:
+        return None
+    try:
+        with httpx.Client(timeout=300) as c:
+            token = _token(c, base, email, password)
+            r = c.post(f"{base}/api/admin/recepciones",
+                       headers={"Authorization": f"Bearer {token}"}, json={"filas": filas})
+            if r.status_code == 404:
+                # Plataforma sin el endpoint desplegado todavia: no es un fallo.
+                return None
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:  # noqa: BLE001 - publicar nunca debe romper la carga
+        fallo_publicacion("las recepciones", e)
+        return None
 
 
 def publicar_compras_precios() -> dict | None:
@@ -2072,6 +2179,10 @@ def _correr(corrida: dict, oficial: bool = False, ignorar_frescura: bool = False
         if ocs:
             print(f"  OC recientes: {ocs.get('lineas_recibidas')} OC; "
                   f"{ocs.get('sugerencias_cerradas')} sugerencias de una sola vez cerradas.")
+        # Cuando llego por ultima vez cada producto, para el requerimiento de sucursal.
+        rec = publicar_con_reintentos("las recepciones", publicar_recepciones)
+        if rec:
+            print(f"  ultima recepcion publicada: {rec.get('filas_cargadas')} filas.")
         # Los meses de venta que la plataforma no tenga. Normalmente ninguno; al
         # pegar un mes nuevo en el respaldo, ese mes.
         vta = publicar_con_reintentos("las ventas", publicar_ventas_historicas)
