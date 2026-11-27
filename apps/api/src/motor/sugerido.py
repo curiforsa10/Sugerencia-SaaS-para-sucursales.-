@@ -190,7 +190,8 @@ def calcular_sugerido(
     )
     es_cd = pl.col("sucursal_final") == P.CD_ID
     compra = (
-        pl.when(es_cd)
+        pl.when(pl.col("sucursal_final").is_in(list(P.SUCURSALES_SOLO_CD))).then(pl.lit(False))
+        .when(es_cd)
         .then(pl.col("clasificacion_abc_agregada").is_in(list(P.CLASES_QUE_COMPRAN)))
         .otherwise(pl.col("clasificacion_abc").is_in(list(P.CLASES_QUE_COMPRAN_SUCURSAL)))
     )

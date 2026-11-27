@@ -156,7 +156,11 @@ def calcular_abc(
     # arrastraba a todas las demas a centralizacion, aunque entre ellas apenas se
     # vendiera. Lo que decide si vale la pena centralizar es cuanto suman LAS QUE
     # LO PIDEN POCO, no la que ya lo vende sola (Abastecimiento, 18-ago-2026).
-    pares_d = base.filter(pl.col("clasificacion_abc") == "D").select(local)
+    # ML-FULL entra siempre: se abastece solo desde el CD, sea cual sea su clase.
+    pares_d = base.filter(
+        (pl.col("clasificacion_abc") == "D")
+        | pl.col("sucursal_final").is_in(list(P.SUCURSALES_SOLO_CD))
+    ).select(local)
     vpos_d = vpos.join(pares_d, on=local, how="semi")
     agg_d = (
         combos.select(agg).unique()
@@ -181,7 +185,10 @@ def calcular_abc(
     # queda con filas que nadie abastece. Desde ago-2026 es "D local + A/B en la
     # agregada de las sucursales D" (antes: C/D local + A/B agregada normal).
     cola = base.filter(
-        pl.col("clasificacion_abc").is_in(list(P.CENTRALIZACION_CLASES_LOCALES))
+        (
+            pl.col("clasificacion_abc").is_in(list(P.CENTRALIZACION_CLASES_LOCALES))
+            | pl.col("sucursal_final").is_in(list(P.SUCURSALES_SOLO_CD))
+        )
         & pl.col(
             "clasificacion_abc_agregada_d" if P.CENTRALIZACION_AGREGADA_SOLO_D
             else "clasificacion_abc_agregada"

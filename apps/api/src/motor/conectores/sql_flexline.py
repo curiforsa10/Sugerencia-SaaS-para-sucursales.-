@@ -257,6 +257,29 @@ def mapear_sucursal_id(codigo: str | None) -> str:
     return SUCURSAL_ID_MAP.get(codigo, SUCURSAL_ID_DEFAULT)
 
 
+def sucursal_ml_full_expr() -> pl.Expr:
+    """SUCURSAL: lo que Mercado Libre liquida desde su centro Full va a ML-FULL.
+
+    Es el documento LIQ FACT-REPUESTOS (y su NC LIQ FACT) con venta ML en Canal
+    Digital, o en Oficinas Centrales antes de enero de 2026. El tipo de documento
+    solo existe en el crudo, por eso se decide aca y no en `preparar_ventas`
+    (Abastecimiento, 27-11-2026)."""
+    from .. import parametros as P
+
+    doc = pl.col("tipoDocto").cast(pl.Utf8).str.strip_chars().str.to_uppercase()
+    es_full = (
+        doc.is_in(list(P.ML_FULL_DOCUMENTOS))
+        & pl.col("SUCURSAL").is_in(list(P.ML_FULL_SUCURSALES_VENTA))
+        & (pl.col("Tipo-Venta") == P.ML_FULL_TIPO_VENTA)
+    )
+    return (
+        pl.when(es_full.fill_null(False))
+        .then(pl.lit(P.SUCURSAL_ML_FULL))
+        .otherwise(pl.col("SUCURSAL"))
+        .alias("SUCURSAL")
+    )
+
+
 def cantidad_ajustada_expr(con_monto: bool = True) -> pl.Expr:
     """CantidadAjustada: -ABS(Cantidad) si el documento es de credito, si no ABS(Cantidad).
 
@@ -374,6 +397,7 @@ def normalizar_ventas_curifor(
     return df.with_columns(
         cantidad_ajustada_expr(con_monto).alias("CantidadAjustada"),
         pl.lit("Curifor").alias("Fuente"),
+        sucursal_ml_full_expr(),
     ).select([
         # Mayusculas tambien aca: por el SQL la venta no pasa por el lector Excel.
         pl.col("Producto").str.to_uppercase(),

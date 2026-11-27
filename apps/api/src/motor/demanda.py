@@ -106,7 +106,10 @@ def calcular_demanda(
         # Las sucursales cuya venta se suma: las mismas que el CD abastece.
         sucsD = grupos.filter(
             (pl.col("sucursal_final") != P.CD_ID)
-            & pl.col("clasificacion_abc").is_in(list(P.CENTRALIZACION_CLASES_LOCALES))
+            & (
+                pl.col("clasificacion_abc").is_in(list(P.CENTRALIZACION_CLASES_LOCALES))
+                | pl.col("sucursal_final").is_in(list(P.SUCURSALES_SOLO_CD))
+            )
         ).select(["producto_master", "sucursal_final"])
         consolidar = pl.concat([
             cd_ab.with_columns(pl.lit(P.CD_ID).alias("sucursal_final")),

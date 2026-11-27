@@ -67,7 +67,7 @@ def calcular_traslados(
         (pl.col("sucursal_final") != P.CD_ID)
         & pl.col("clasificacion_abc").is_in(list(P.CLASES_LOCAL_RUTEADAS_CD))
         & pl.col("clasificacion_abc_agregada").is_in(list(P.CLASES_AGG_QUE_CONSOLIDA_CD))
-    )
+    ) | pl.col("sucursal_final").is_in(list(P.SUCURSALES_SOLO_CD))
     r = r.with_columns(elegible.alias("_elegible"))
     r = r.sort(["producto_master", "prioridad_cd"]).with_columns(
         pl.when(pl.col("_elegible"))

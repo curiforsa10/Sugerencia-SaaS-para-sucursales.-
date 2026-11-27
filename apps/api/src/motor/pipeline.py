@@ -295,9 +295,12 @@ def ejecutar(
     # locales cuya demanda consolida (orden no garantizado por el modelo).
     origen_cd = (
         r.filter(
-            (pl.col("sucursal_final") != P.CD_ID)
-            & pl.col("clasificacion_abc").is_in(["C", "D"])
-            & pl.col("clasificacion_abc_agregada").is_in(["A", "B"])
+            (
+                (pl.col("sucursal_final") != P.CD_ID)
+                & pl.col("clasificacion_abc").is_in(["C", "D"])
+                & pl.col("clasificacion_abc_agregada").is_in(["A", "B"])
+            )
+            | pl.col("sucursal_final").is_in(list(P.SUCURSALES_SOLO_CD))
         )
         .group_by("producto_master")
         .agg(pl.col("sucursal_final").str.join(", ").alias("sucursales_origen_cd"))

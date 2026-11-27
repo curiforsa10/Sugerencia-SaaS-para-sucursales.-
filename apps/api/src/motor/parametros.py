@@ -23,6 +23,22 @@ SUCURSALES_EXCLUIDAS = {
 # (no son filas propias del sugerido).
 ESPECIALES_CD = {"CANAL DIGITAL", "OFICINAS CENTRALES", "LINDEROS VTA MOVIL"}
 
+# --- Bodega ML-FULL (centro Full de Mercado Libre) ------------------------------
+# Es independiente del CD (Abastecimiento, 27-11-2026): su stock no es del CD y su
+# venta es la que Mercado Libre liquida, documento LIQ FACT-REPUESTOS (y su nota de
+# credito NC LIQ FACT) con venta ML en la sucursal 430 Canal Digital. Antes de
+# enero de 2026 esas liquidaciones quedaban en Oficinas Centrales.
+#
+# Se trata como una sucursal mas que SIEMPRE se abastece por traslado desde el CD:
+# nunca compra al proveedor, y el CD consolida su demanda para comprar por ella
+# (igual que con las sucursales clase D).
+SUCURSAL_ML_FULL = "BODEGA ML-FULL"
+ML_FULL_DOCUMENTOS = {"LIQ FACT-REPUESTOS", "NC LIQ FACT"}
+ML_FULL_SUCURSALES_VENTA = {"CANAL DIGITAL", "OFICINAS CENTRALES"}
+ML_FULL_TIPO_VENTA = "VTA ML"
+# Sucursales que solo se abastecen desde el CD, sea cual sea su clase.
+SUCURSALES_SOLO_CD = (SUCURSAL_ML_FULL,)
+
 # Productos/conceptos no comprables excluidos de la demanda.
 PRODUCTOS_EXCLUIDOS = {
     "D&P REPTO-TALLER(T)", "D&P REPTO-TALLER(R)", "MEC INSUMOS-PESADOS",

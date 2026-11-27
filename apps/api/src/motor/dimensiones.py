@@ -77,6 +77,8 @@ _DIM_SUCURSAL_FILAS: tuple[tuple[str, str, str | None, str | None, str, bool], .
     ("BODEGA DANADOS", "Bodega Dañados", None, None, "Virtual", False),
     ("BODEGA DEVOLUCION", "Bodega Devolución", None, None, "Virtual", False),
     ("BODEGA ML", "Bodega Mercado Libre", None, None, "Virtual", False),
+    # Centro Full de Mercado Libre: fila propia del sugerido, abastecida por el CD.
+    ("BODEGA ML-FULL", "Bodega ML Full", None, "RM", "Comercial", False),
     ("BODEGA SCRAP", "Bodega Scrap", None, None, "Virtual", False),
     ("BODEGA IMPORTACION", "Bodega Importación", None, None, "Virtual", False),
     ("COMEX", "Comex", None, None, "Virtual", False),

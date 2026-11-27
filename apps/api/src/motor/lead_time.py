@@ -205,6 +205,7 @@ def calcular_lead_time(
         .otherwise(
             pl.when(
                 pl.col("es_importado")
+                | pl.col("sucursal_final").is_in(list(P.SUCURSALES_SOLO_CD))
                 | (
                     pl.col("clasificacion_abc").is_in(list(P.CENTRALIZACION_CLASES_LOCALES))
                     & pl.col(
