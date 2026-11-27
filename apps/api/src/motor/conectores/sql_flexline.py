@@ -375,7 +375,8 @@ def normalizar_ventas_curifor(
         cantidad_ajustada_expr(con_monto).alias("CantidadAjustada"),
         pl.lit("Curifor").alias("Fuente"),
     ).select([
-        "Producto",
+        # Mayusculas tambien aca: por el SQL la venta no pasa por el lector Excel.
+        pl.col("Producto").str.to_uppercase(),
         pl.col("SUCURSAL"),
         pl.col("Tipo-Venta").alias("TipoVenta"),
         "Fecha",
@@ -409,7 +410,7 @@ def normalizar_ventas_frontera(raw: pl.DataFrame) -> pl.DataFrame:
         cantidad_ajustada_expr(COL_TOTAL_NETA in df.columns).alias("CantidadAjustada"),
         pl.lit("Frontera").alias("Fuente"),
     ).select([
-        pl.col("producto").alias("Producto"),
+        pl.col("producto").str.to_uppercase().alias("Producto"),
         pl.col("SUCURSAL"),
         pl.col("Tipo-Venta").alias("TipoVenta"),
         pl.col("fecha").alias("Fecha"),

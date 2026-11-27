@@ -315,6 +315,20 @@ def _tipoproducto_canonico() -> pl.Expr:
     )
 
 
+def codigo_en_mayusculas(col: str) -> pl.Expr:
+    """El codigo de producto en mayusculas.
+
+    El ERP acepta el mismo codigo escrito de dos formas: entre mayo y octubre de
+    2026 hubo 11 documentos de Mercado Libre con `20 bxo5w30aa` en vez de
+    `20 BXO5W30AA`. El Power BI no distinguia mayusculas (DAX es case-insensitive)
+    y los juntaba; el motor los separaba en dos productos, con una fila propia en
+    el CD que pedia comprar teniendo 481 unidades del mismo aceite (Abastecimiento,
+    27-11-2026). En el stock, el seguimiento y el maestro todos los codigos vienen
+    en mayusculas, asi que llevar la venta a mayusculas no separa nada que hoy este
+    junto."""
+    return pl.col(col).str.to_uppercase().alias(col)
+
+
 def _sucursal_sin_prefijo() -> pl.Expr:
     """`08 TALCA` -> `TALCA`. El respaldo trae la sucursal con el prefijo de orden
     del informe; el modelo la resuelve via Dim_Locales y el sugerido usa el nombre
@@ -369,6 +383,7 @@ def leer_ventas_excel(rutas: str | Path | Iterable[str | Path]) -> pl.DataFrame:
             df.with_columns(
                 _a_fecha("Fecha"),
                 _a_entero("Cantidad"),
+                codigo_en_mayusculas("Producto"),
                 _tipoproducto_canonico(),
                 _sucursal_sin_prefijo(),
             )
@@ -408,7 +423,7 @@ def leer_ventas_frontera_excel(ruta: str | Path) -> pl.DataFrame:
         COLUMNAS_VENTAS_FRONTERA,
         obligatorias=["producto", "cantidad", "Documento", "Docto-Emitido", "tipoproducto"],
     )
-    return df.with_columns(_a_fecha("fecha"), _a_entero("cantidad"))
+    return df.with_columns(_a_fecha("fecha"), _a_entero("cantidad"), codigo_en_mayusculas("producto"))
 
 
 # --------------------------------------------------------------------------- #

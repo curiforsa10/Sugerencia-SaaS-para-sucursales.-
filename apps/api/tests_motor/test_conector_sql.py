@@ -95,6 +95,27 @@ def test_normalizar_ventas_curifor():
     assert out.get_column("Fuente").unique().to_list() == ["Curifor"]
 
 
+def test_normalizar_ventas_lleva_el_codigo_a_mayusculas():
+    """Por el SQL la venta no pasa por el lector Excel: la normalizacion tambien
+    junta `20 bxo5w30aa` con `20 BXO5W30AA`, como hacia el Power BI."""
+    raw = pl.DataFrame({
+        "Producto": ["20 BXO5W30AA", "20 bxo5w30aa"],
+        "SUCURSAL": ["TALCA", "CANAL DIGITAL"],
+        "Tipo-Venta": ["VTA MESON", "VTA ML"],
+        "Fecha": [date(2026, 10, 1)] * 2,
+        "Cantidad": [3, 9],
+        "tipoDocto": ["FACTURA", "FACTURA"],
+        "tipoproducto": ["REPUESTOS", "REPUESTOS"],
+    })
+    assert F.normalizar_ventas_curifor(raw)["Producto"].to_list() == ["20 BXO5W30AA"] * 2
+    front = pl.DataFrame({
+        "producto": ["20 bxo5w30aa"], "SUCURSAL": ["02 LINDEROS"], "Tipo-Venta": ["CLIENTE"],
+        "fecha": [date(2026, 10, 1)], "cantidad": [2], "Documento": ["FACTURA ST"],
+        "Docto-Emitido": ["Emitido"], "tipoproducto": ["REPUESTO"],
+    })
+    assert F.normalizar_ventas_frontera(front)["Producto"].to_list() == ["20 BXO5W30AA"]
+
+
 def test_conectar_sin_credenciales_falla_claro(monkeypatch):
     monkeypatch.delenv("FLEXLINE_SQL_USER", raising=False)
     monkeypatch.delenv("FLEXLINE_SQL_PASSWORD", raising=False)

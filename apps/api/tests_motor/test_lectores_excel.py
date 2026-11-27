@@ -335,3 +335,40 @@ def test_los_codigos_con_espacio_al_final_no_crean_un_producto_aparte(tmp_path):
     crudo = lx.leer_ventas_excel(ruta)
     assert crudo["Producto"].unique().to_list() == ["15 MXD1454M"]
     assert crudo["SUCURSAL"].unique().to_list() == ["TALCA"]
+
+
+def test_el_mismo_codigo_en_minusculas_no_crea_un_producto_aparte(tmp_path):
+    """El ERP acepto `20 bxo5w30aa` en 11 documentos de Mercado Libre (may-oct 2026).
+    El Power BI no distinguia mayusculas y lo juntaba con `20 BXO5W30AA`; el motor
+    le armaba una fila propia en el CD que pedia comprar 8 teniendo 481 del mismo
+    aceite (Abastecimiento, 27-11-2026)."""
+    ruta = _crear_excel(
+        tmp_path / "2026.xlsx",
+        _ENCABEZADOS_VENTAS,
+        [
+            ["E01", "202610", "FACTURA S/T", "2026-10-09 00:00:00", "VTA MESON",
+             "20 BXO5W30AA", 3, "REPUESTOS", "08 TALCA"],
+            ["E01", "202610", "FA-ELECTR REPTO", "2026-10-10 00:00:00", "VTA ML",
+             "20 bxo5w30aa", 9, "REPUESTOS", "CANAL DIGITAL"],
+        ],
+        col_a_vacia=False,
+    )
+    crudo = lx.leer_ventas_excel(ruta)
+    assert crudo["Producto"].unique().to_list() == ["20 BXO5W30AA"]
+    out = F.normalizar_ventas_curifor(crudo)
+    assert out["Producto"].to_list() == ["20 BXO5W30AA", "20 BXO5W30AA"]
+    # La descripcion y el resto de las columnas no se tocan.
+    assert out["SUCURSAL"].to_list() == ["TALCA", "CANAL DIGITAL"]
+
+
+def test_ventas_frontera_tambien_lleva_el_codigo_a_mayusculas(tmp_path):
+    ruta = _crear_excel(
+        tmp_path / "frontera.xlsx",
+        ["producto", "SUCURSAL", "Tipo-Venta", "fecha", "cantidad", "Documento",
+         "Docto-Emitido", "tipoproducto"],
+        [["20 bxo5w30aa", "02 LINDEROS", "CLIENTE", "2026-10-09 00:00:00", 2,
+          "FACTURA ST", "Emitido", "REPUESTO"]],
+        col_a_vacia=False,
+    )
+    crudo = lx.leer_ventas_frontera_excel(ruta)
+    assert crudo["producto"].to_list() == ["20 BXO5W30AA"]
